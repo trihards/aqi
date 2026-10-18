@@ -292,7 +292,7 @@ function sourcesHTML() {
       Otherwise the reading is the model estimate for the grid cell. Trend is the change in modeled AQI over the previous 3 hours.
       The air quality map draws each model cell at its native size without smoothing, so nearby towns often share a value.</dd>
     <dt>Map</dt>
-    <dd>Base map © OpenStreetMap contributors, © CARTO.</dd>
+    <dd>Base map: Esri Gray Canvas (Esri, HERE, Garmin, © OpenStreetMap contributors). Falls back to OpenStreetMap tiles if Esri is unreachable.</dd>
   </dl>`;
 }
 

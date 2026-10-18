@@ -65,10 +65,11 @@ const arcgis = () => ({
 });
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=', 'base64');
 
-async function page(browser, { width, height, failMonitors, failModel, modelDelay = 0, dark = false }) {
+async function page(browser, { width, height, failMonitors, failModel, failTiles, modelDelay = 0, dark = false }) {
   const ctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 2, hasTouch: true, isMobile: true, colorScheme: dark ? 'dark' : 'light' });
   const pg = await ctx.newPage();
   const errors = [];
+  const tiles = { esri: 0, osm: 0 };
   pg.on('pageerror', e => errors.push(e.message));
   pg.on('console', m => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) errors.push(m.text()); });
   await pg.route(/^https?:\/\/(?!localhost)/, async route => {
@@ -82,11 +83,13 @@ async function page(browser, { width, height, failMonitors, failModel, modelDela
       if (failMonitors) return route.fulfill({ status: 503, body: 'down' });
       return route.fulfill({ contentType: 'application/json', body: JSON.stringify(arcgis()) });
     }
-    if (url.includes('cartocdn')) return route.fulfill({ contentType: 'image/png', body: PNG });
+    if (url.includes('arcgisonline.com')) { tiles.esri++; if (failTiles) return route.fulfill({ status: 503, body: '' }); }
+    if (url.includes('openstreetmap.org')) tiles.osm++;
+    if (url.includes('arcgisonline.com') || url.includes('openstreetmap.org')) return route.fulfill({ contentType: 'image/png', body: PNG });
     return route.abort();
   });
   await pg.goto(BASE);
-  return { pg, ctx, errors };
+  return { pg, ctx, errors, tiles };
 }
 
 const shot = (pg, name, full = false) => pg.screenshot({ path: `${OUT}/${name}.png`, fullPage: full });
@@ -98,7 +101,7 @@ let failures = 0;
 const check = (cond, msg) => { log(`${cond ? 'PASS' : 'FAIL'}  ${msg}`); if (!cond) failures++; };
 
 { // main flow, iPhone 14-ish
-  const { pg, ctx, errors } = await page(browser, { width: 390, height: 844 });
+  const { pg, ctx, errors, tiles } = await page(browser, { width: 390, height: 844 });
   await pg.waitForSelector('.ro-num:not(.is-blank)');
   await pg.waitForTimeout(300);
   await shot(pg, '01-home-390', true);
@@ -169,6 +172,7 @@ const check = (cond, msg) => { log(`${cond ? 'PASS' : 'FAIL'}  ${msg}`); if (!co
   await pg.click('#exBack');
   await pg.waitForTimeout(300);
   check(await pg.$eval('#explorer', e => e.hidden), 'back button returns to console');
+  check(tiles.esri > 0 && tiles.osm === 0, `basemap uses Esri tiles (esri ${tiles.esri}, osm ${tiles.osm})`);
   check(errors.length === 0, `no console errors (${errors.join(' | ')})`);
   await ctx.close();
 }
@@ -190,7 +194,7 @@ const check = (cond, msg) => { log(`${cond ? 'PASS' : 'FAIL'}  ${msg}`); if (!co
 }
 
 { // slow model + monitor outage
-  const { pg, ctx, errors } = await page(browser, { width: 375, height: 667, failMonitors: true, modelDelay: 7000 });
+  const { pg, ctx, errors, tiles } = await page(browser, { width: 375, height: 667, failMonitors: true, failTiles: true, modelDelay: 7000 });
   await pg.waitForTimeout(5600);
   await shot(pg, '09-slow-loading');
   check(/Still loading/.test(await pg.$eval('#readout', e => e.textContent)), 'slow load shows a still-loading message');
@@ -198,6 +202,7 @@ const check = (cond, msg) => { log(`${cond ? 'PASS' : 'FAIL'}  ${msg}`); if (!co
   check(/Model estimate/.test(await pg.$eval('#readout .badge', e => e.textContent)), 'without monitors the reading is labelled as a model estimate');
   check(/unavailable/i.test(await pg.$eval('#sources', e => e.textContent)), 'monitor outage is reported in sources');
   await shot(pg, '10-no-monitors', true);
+  check(tiles.osm > 0, `basemap falls back to OpenStreetMap when Esri fails (esri ${tiles.esri}, osm ${tiles.osm})`);
   check(errors.length === 0, `no console errors (${errors.join(' | ')})`);
   await ctx.close();
 }

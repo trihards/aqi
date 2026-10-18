@@ -8,7 +8,7 @@ Mobile-first air-quality prototype for the San Francisco Bay Area. Static site i
 | --- | --- | --- |
 | [Open-Meteo Air Quality](https://open-meteo.com/en/docs/air-quality-api) (CAMS global, ~40 km) | Timeline (3 days back, ~5 ahead), pollutant breakdown, regional field | Model. Past hours are model values, not observations. CC BY 4.0 |
 | EPA AirNow, via EPA's public ArcGIS feed "Air Now Current Monitor Data Public" | Monitor markers, "Measured" readings | Observed, latest hour only, preliminary |
-| CARTO basemaps (OSM data) | Map tiles | © OpenStreetMap, © CARTO |
+| Esri Light/Dark Gray Canvas (keyless; OSM fallback) | Map tiles | Esri, HERE, Garmin, © OpenStreetMap contributors |
 
 OpenAQ was evaluated and not used: its API does not allow browser (CORS) requests and needs a key, so it would require a proxy. The AirNow REST API needs a key too.
 

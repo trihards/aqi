@@ -2,15 +2,41 @@ import { catHex } from './aqi.js';
 
 const L = window.L;
 const dark = matchMedia('(prefers-color-scheme: dark)');
-const tileUrl = () =>
-  `https://{s}.basemaps.cartocdn.com/${dark.matches ? 'dark_all' : 'light_all'}/{z}/{x}/{y}{r}.png`;
-const ATTR = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · © <a href="https://carto.com/attributions">CARTO</a>';
+
+// Basemap: Esri Light/Dark Gray Canvas (keyless raster, retiring Dec 2029), with
+// its separate label layer on top. CARTO's raster tiles began requiring a key in
+// Sept 2026. If Esri tiles fail repeatedly we drop to OpenStreetMap's standard tiles.
+const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas';
+const esriUrl = part => `${ESRI}/World_${dark.matches ? 'Dark' : 'Light'}_Gray_${part}/MapServer/tile/{z}/{y}/{x}`;
+const ESRI_ATTR = 'Esri, HERE, Garmin, © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, and the GIS user community';
+const OSM_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const OSM_ATTR = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 export const BAY_BOUNDS = [[37.15, -122.85], [38.55, -121.65]];
 
-function baseMap(el, opts) {
+function baseMap(el, opts, attribution) {
   const map = L.map(el, { zoomSnap: 0.5, attributionControl: false, ...opts });
-  const tiles = L.tileLayer(tileUrl(), { subdomains: 'abcd', maxZoom: 14, minZoom: 6, detectRetina: true }).addTo(map);
-  dark.addEventListener('change', () => tiles.setUrl(tileUrl()));
+  const tileOpts = { maxZoom: 14, maxNativeZoom: 16, minZoom: 6 };
+  const base = L.tileLayer(esriUrl('Base'), tileOpts).addTo(map);
+  // Labels sit above model cells (overlayPane, 400) and below markers (600).
+  map.createPane('labels');
+  map.getPane('labels').style.zIndex = 450;
+  map.getPane('labels').style.pointerEvents = 'none';
+  const labels = L.tileLayer(esriUrl('Reference'), { ...tileOpts, pane: 'labels' }).addTo(map);
+  attribution?.addAttribution(ESRI_ATTR);
+  let errors = 0, fellBack = false;
+  base.on('tileerror', () => {
+    if (fellBack || ++errors < 3) return;
+    fellBack = true;
+    labels.remove();
+    base.setUrl(OSM_URL);
+    attribution?.removeAttribution(ESRI_ATTR).addAttribution(OSM_ATTR);
+  });
+  base.on('tileload', () => { if (!fellBack) errors = 0; });
+  dark.addEventListener('change', () => {
+    if (fellBack) return;
+    base.setUrl(esriUrl('Base'));
+    labels.setUrl(esriUrl('Reference'));
+  });
   return map;
 }
 
@@ -41,8 +67,9 @@ export class Explorer {
 
   ensure() {
     if (this.map) return;
-    this.map = baseMap(this.el, { zoomControl: false, tapTolerance: 20 });
-    L.control.attribution({ position: 'topright', prefix: false }).addAttribution(ATTR).addTo(this.map);
+    const attr = L.control.attribution({ position: 'topright', prefix: false });
+    this.map = baseMap(this.el, { zoomControl: false, tapTolerance: 20 }, attr);
+    attr.addTo(this.map);
     L.control.zoom({ position: 'topright' }).addTo(this.map);
     this.map.fitBounds(BAY_BOUNDS);
     this.layers = {
