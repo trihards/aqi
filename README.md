@@ -23,4 +23,4 @@ OpenAQ was evaluated and not used: its API does not allow browser (CORS) request
 
 ## Deploy
 
-`.github/workflows/pages.yml` publishes `web/` to GitHub Pages on every push to `main`. To turn it on, open Settings → Pages and set Source to "GitHub Actions".
+`.github/workflows/pages.yml` publishes the repo to GitHub Pages on every push to `main`; the root `index.html` redirects to `web/`. Live at https://trihards.github.io/aqi/
