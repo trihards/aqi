@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e6e6e2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121416" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="AQI">
+<title>AQI Observatory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Michroma&display=swap">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<main id="home" class="home">
+  <header class="plate">
+    <span class="plate-name">AQI&nbsp;Observatory</span>
+    <span class="plate-model">US AQI · Bay Area</span>
+  </header>
+
+  <section class="locbar" aria-label="Location">
+    <button id="placeBtn" class="btn btn-place" type="button" aria-haspopup="dialog">
+      <span class="lbl">Location</span>
+      <span id="placeName" class="place-name">—</span>
+      <svg class="chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4"/></svg>
+    </button>
+  </section>
+
+  <section class="module" aria-labelledby="lbl-now">
+    <h2 id="lbl-now" class="mlabel">Reading</h2>
+    <div id="readout" class="well" aria-live="polite"></div>
+  </section>
+
+  <section class="module" aria-labelledby="lbl-tl">
+    <div class="mhead">
+      <h2 id="lbl-tl" class="mlabel">Timeline <span class="mlabel-sub">hourly · 3 days back, forecast ahead</span></h2>
+    </div>
+    <div class="well well-tl">
+      <div id="tlReadout" class="tl-readout" aria-live="polite"></div>
+      <div id="tlHome" class="tl"></div>
+      <div class="tl-controls">
+        <button class="btn btn-step" type="button" data-step="-3" aria-label="Back 3 hours">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg><span>3 h</span></button>
+        <button class="btn btn-now" type="button" data-now aria-label="Return to now">Now</button>
+        <button class="btn btn-step" type="button" data-step="3" aria-label="Forward 3 hours">
+          <span>3 h</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg></button>
+      </div>
+      <ul class="legend" aria-label="Timeline legend">
+        <li><svg viewBox="0 0 24 8" aria-hidden="true"><path d="M1 4h22" class="lg-past"/></svg>Model, past</li>
+        <li><svg viewBox="0 0 24 8" aria-hidden="true"><path d="M1 4h22" class="lg-fc"/></svg>Forecast</li>
+        <li><svg viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4" class="lg-meas"/></svg>Measured now</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="module" aria-labelledby="lbl-pol">
+    <h2 id="lbl-pol" class="mlabel">Pollutants <span id="polWhen" class="mlabel-sub"></span></h2>
+    <div id="pollutants"></div>
+  </section>
+
+  <section class="module" aria-labelledby="lbl-map">
+    <h2 id="lbl-map" class="mlabel">Nearby</h2>
+    <button id="openMap" class="map-preview" type="button" aria-label="Open the map explorer">
+      <div id="previewMap" class="preview-map" aria-hidden="true"></div>
+      <span class="map-preview-cta">Open map <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg></span>
+    </button>
+  </section>
+
+  <footer class="module sources" aria-labelledby="lbl-src">
+    <h2 id="lbl-src" class="mlabel">Sources &amp; method</h2>
+    <div id="sources"></div>
+  </footer>
+</main>
+
+<section id="explorer" class="explorer" hidden aria-label="Map explorer">
+  <div id="map" class="map"></div>
+  <div class="ex-top">
+    <div class="ex-row">
+      <button id="exBack" class="btn btn-icon" type="button" aria-label="Back to console">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg></button>
+      <div class="seg" role="radiogroup" aria-label="Map mode">
+        <button type="button" role="radio" data-mode="locations" aria-checked="true">Locations</button>
+        <button type="button" role="radio" data-mode="field" aria-checked="false">Air quality</button>
+      </div>
+    </div>
+    <div id="exLegend" class="ex-legend"></div>
+    <button id="exTime" class="ex-time" type="button" hidden></button>
+  </div>
+
+  <div id="sheet" class="sheet" data-state="compact">
+    <div id="sheetGrab" class="sheet-grab">
+      <span class="grip" aria-hidden="true"></span>
+    </div>
+    <div class="sheet-head">
+      <div class="sheet-place">
+        <span id="sheetKind" class="lbl"></span>
+        <span id="sheetName" class="sheet-name">—</span>
+      </div>
+      <button id="sheetToggle" class="btn btn-toggle" type="button" aria-expanded="false" aria-controls="sheetMore">
+        <span>More</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 8l4-4 4 4"/></svg></button>
+    </div>
+    <div class="sheet-body">
+      <div id="sheetReadout"></div>
+      <div id="sheetMore" class="sheet-more">
+        <div class="well well-tl">
+          <div id="tlSheetReadout" class="tl-readout" aria-live="polite"></div>
+          <div id="tlSheet" class="tl"></div>
+          <div class="tl-controls">
+            <button class="btn btn-step" type="button" data-step="-3" aria-label="Back 3 hours">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3L5 8l5 5"/></svg><span>3 h</span></button>
+            <button class="btn btn-now" type="button" data-now aria-label="Return to now">Now</button>
+            <button class="btn btn-step" type="button" data-step="3" aria-label="Forward 3 hours">
+              <span>3 h</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5"/></svg></button>
+          </div>
+        </div>
+        <div id="sheetPollutants"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<dialog id="placeDialog" class="dialog" aria-labelledby="placeDialogTitle">
+  <form method="dialog" class="dialog-inner">
+    <div class="dialog-head">
+      <h2 id="placeDialogTitle" class="mlabel">Choose location</h2>
+      <button class="btn btn-icon" value="cancel" aria-label="Close">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+    </div>
+    <button id="useGps" class="row-btn" type="button">Use my current location<span class="row-note">Stays on this device</span></button>
+    <button id="pickOnMap" class="row-btn" type="button">Pick on the map</button>
+    <div id="placeList" class="place-list"></div>
+  </form>
+</dialog>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

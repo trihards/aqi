@@ -1,0 +1,12 @@
+{
+  "name": "aqi-observatory",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "npx http-server web -p 8080 -c-1",
+    "test": "node tests/smoke.mjs test-output"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}
