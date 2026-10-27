@@ -1,6 +1,7 @@
 import { CATS, category, POLLUTANTS, scalePos } from './aqi.js';
 import {
-  fetchModel, fetchField, fetchMonitors, PLACES, nearest, fieldValueAt, indexAtOrBefore,
+  fetchModel, fetchField, fetchMonitors, searchPlaces, PLACES, DOMAINS, nearest, fieldValueAt, indexAtOrBefore,
+  domainFor, fieldSpec, fieldHolds, viewBounds, inBayArea, airnowCovers, monitorBox, boxHolds,
 } from './data.js';
 import { Timeline } from './timeline.js';
 import { Explorer, Preview } from './map.js';
@@ -14,11 +15,18 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 
 const MONITOR_RADIUS_KM = 10;
 const MONITOR_FRESH_MS = 3 * 3600e3;
+const RECENT_MAX = 5;
+
+const validPlace = p => !!p && typeof p.kind === 'string' && Number.isFinite(p.lat) && Number.isFinite(p.lon)
+  && Math.abs(p.lat) <= 90 && Math.abs(p.lon) <= 180;
+const savedPlace = store.get('aqi.place');
 
 const S = {
-  place: store.get('aqi.place') || { kind: 'preset', ...PLACES[0] },
+  place: validPlace(savedPlace) ? savedPlace : { kind: 'preset', ...PLACES[0] },
+  recent: (Array.isArray(store.get('aqi.recent')) ? store.get('aqi.recent') : []).filter(validPlace).slice(0, RECENT_MAX),
   model: null, dayParts: [], modelStatus: 'loading', modelError: null, modelStart: Date.now(),
-  monitors: { status: 'loading', list: [], error: null, data: null },
+  monitors: { status: 'loading', list: [], error: null, data: null, bbox: null },
+  search: { q: '', status: 'idle', results: [], error: null },
   field: { status: 'idle', data: null, error: null },
   selT: null,          // selected hour (epoch s); null = follow "now"
   mode: 'locations',
@@ -33,9 +41,19 @@ const fmt = (opts, tz) => {
   if (!fmtCache.has(k)) fmtCache.set(k, new Intl.DateTimeFormat('en-US', { ...opts, timeZone: tz }));
   return fmtCache.get(k);
 };
-const tzOf = () => S.model?.tz || 'America/Los_Angeles';
-const hourLabel = ms => fmt({ weekday: 'short', hour: 'numeric' }, tzOf()).format(ms);
-const clock = ms => fmt({ hour: 'numeric', minute: '2-digit' }, tzOf()).format(ms);
+// Times are shown in the selected location's zone. When that differs from the phone's
+// own zone, the zone is named so a 3 PM in Paris is not read as 3 PM at home.
+const deviceTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return null; } })();
+const tzOf = () => S.model?.tz || S.place.tz
+  || (inBayArea(S.place.lat, S.place.lon) ? 'America/Los_Angeles' : deviceTz) || 'UTC';
+const zone = ms => {
+  const tz = tzOf();
+  if (tz === deviceTz) return '';
+  const z = fmt({ hour: 'numeric', timeZoneName: 'short' }, tz).formatToParts(ms).find(x => x.type === 'timeZoneName');
+  return z ? ` ${z.value}` : '';
+};
+const hourLabel = ms => fmt({ weekday: 'short', hour: 'numeric' }, tzOf()).format(ms) + zone(ms);
+const clock = ms => fmt({ hour: 'numeric', minute: '2-digit' }, tzOf()).format(ms) + zone(ms);
 function rel(ms) {
   const m = Math.round((Date.now() - ms) / 60000);
   const a = Math.abs(m);
@@ -60,7 +78,7 @@ function dayPartsFor(m) {
 }
 
 function placeLabel(p) {
-  if (p.kind === 'preset' || p.kind === 'monitor') return p.name;
+  if (p.kind === 'preset' || p.kind === 'monitor' || p.kind === 'search') return p.name;
   const n = nearest(PLACES, p.lat, p.lon);
   if (p.kind === 'gps') return 'Current location';
   return n && n.km < 25 ? `Near ${n.item.name}` : 'Map point';
@@ -68,10 +86,21 @@ function placeLabel(p) {
 function placeKind(p) {
   if (p.kind === 'monitor') return 'AirNow monitor';
   if (p.kind === 'preset') return 'Place';
+  if (p.kind === 'search') return p.region || 'Place';
   const n = nearest(PLACES, p.lat, p.lon);
   const near = n && n.km < 25 ? ` · ${km(n.km)} from ${n.item.name}` : '';
   return p.kind === 'gps' ? `Device location${near}` : `${p.lat.toFixed(3)}, ${p.lon.toFixed(3)}`;
 }
+
+// Header suffix: "Bay Area" there, otherwise the country when known. The scale stays US AQI everywhere.
+function regionLabel(p) {
+  if (inBayArea(p.lat, p.lon)) return 'Bay Area';
+  return p.country || 'EPA scale';
+}
+
+// The CAMS domain behind the current reading; before the model loads, the one it will use.
+const modelDomain = () => DOMAINS[S.model?.domain] || domainFor(S.place.lat, S.place.lon);
+const modelName = () => (modelDomain().id === 'cams_europe' ? 'CAMS Europe model' : 'CAMS model');
 
 // ---- derived state -------------------------------------------------------------
 function modelInfo() {
@@ -147,7 +176,7 @@ function sourceText(r) {
   const k = r.primary?.kind;
   if (k === 'measured' && r.p.kind === 'monitor') return 'AirNow · latest hourly report';
   if (k === 'measured') return `AirNow monitor · ${esc(r.mon.name)}${r.monKm > 0.2 ? ` · ${km(r.monKm)} away` : ''}`;
-  if (k) return 'CAMS model via Open-Meteo · ~40 km cell';
+  if (k) return `${modelName()} via Open-Meteo · ${modelDomain().km} cell`;
   return '';
 }
 
@@ -172,7 +201,7 @@ function notesHTML(r) {
   const out = [];
   const pr = r.primary;
   if (pr?.kind === 'measured' && r.modelAqi != null) {
-    out.push(`Model estimate for this ~40 km cell: ${n0(r.modelAqi)} (${category(r.modelAqi).label}).`);
+    out.push(`Model estimate for this ${modelDomain().km} cell: ${n0(r.modelAqi)} (${category(r.modelAqi).label}).`);
   }
   if (r.ahead != null && pr && pr.kind !== 'forecast') {
     out.push(`Six hours later: ${n0(r.ahead)} (${category(r.ahead).label}), forecast.`);
@@ -187,6 +216,8 @@ function notesHTML(r) {
     else if (!r.isNow && r.mon) out.push('Monitor readings exist for the latest hour only.');
   } else if (S.monitors.status === 'error') {
     out.push('Monitor feed unavailable; showing model values only.');
+  } else if (S.monitors.status === 'none') {
+    out.push('AirNow monitors are only checked in North America, so readings here are model estimates, not measurements.');
   }
   return out.map(t => `<p class="ro-note">${t}</p>`).join('');
 }
@@ -267,10 +298,11 @@ function pollutantsHTML(r) {
 function sourcesHTML() {
   const M = S.monitors, m = S.model;
   const modelStatus = S.modelStatus === 'ok'
-    ? `Loaded. Model grid point ${m.lat.toFixed(2)}, ${m.lon.toFixed(2)}; fetched ${rel(m.fetchedAt)}.`
+    ? `Loaded. ${DOMAINS[m.domain].name} cell centred at ${m.cellLat.toFixed(2)}, ${m.cellLon.toFixed(2)}; fetched ${rel(m.fetchedAt)}.`
     : S.modelStatus === 'error' ? `Unavailable: ${esc(S.modelError)}.` : 'Loading…';
   const monStatus = M.status === 'ok'
-    ? `${M.list.length} Bay Area sites in the latest feed; fetched ${rel(M.data.fetchedAt)}.`
+    ? `${M.list.length} site${M.list.length === 1 ? '' : 's'} within about 100 km in the latest feed; fetched ${rel(M.data.fetchedAt)}.`
+    : M.status === 'none' ? 'Not checked here. This app queries AirNow only in North America.'
     : M.status === 'error' ? `Unavailable: ${esc(M.error)}. <button class="btn btn-retry sm" type="button" data-retry="monitors">Retry</button>` : 'Loading…';
   const inspector = M.data
     ? `<details class="inspect"><summary>Monitor feed fields</summary>
@@ -279,9 +311,11 @@ function sourcesHTML() {
     : '';
   return `<dl class="src-list">
     <dt>Model estimates and forecast</dt>
-    <dd>Copernicus Atmosphere Monitoring Service (CAMS) global forecast, served by
+    <dd>Copernicus Atmosphere Monitoring Service (CAMS) forecasts, served by
       <a href="https://open-meteo.com/en/docs/air-quality-api" target="_blank" rel="noopener">Open-Meteo</a> (CC BY 4.0).
-      About 40 km resolution. Past hours are model values, not observations. US AQI values are calculated by Open-Meteo from modeled concentrations.
+      In Europe (30–72°N, 25°W–45°E) the CAMS European ensemble: 0.1° cells, about 10 km, forecast about 4 days ahead.
+      Elsewhere the CAMS global model: 0.4° cells, about 40 km, forecast about 5 days ahead. This location uses ${modelDomain().name}.
+      Past hours are model values, not observations. US AQI values are calculated by Open-Meteo from modeled concentrations.
       <span class="status">${modelStatus}</span></dd>
     <dt>Monitor observations</dt>
     <dd>U.S. EPA <a href="https://www.airnow.gov/" target="_blank" rel="noopener">AirNow</a>, via EPA's public
@@ -289,10 +323,22 @@ function sourcesHTML() {
       <span class="status">${monStatus}</span>${inspector}</dd>
     <dt>How readings are chosen</dt>
     <dd>“Measured” is shown when the selected monitor, or one within ${MONITOR_RADIUS_KM} km, reported in the last 3 hours.
-      Otherwise the reading is the model estimate for the grid cell. Trend is the change in modeled AQI over the previous 3 hours.
+      Otherwise the reading is the model estimate for the grid cell. Outside North America every reading is a model estimate.
+      Trend is the change in modeled AQI over the previous 3 hours.
       The air quality map draws each model cell at its native size without smoothing, so nearby towns often share a value.</dd>
+    <dt>US AQI everywhere</dt>
+    <dd>All values use the U.S. EPA Air Quality Index, including outside the United States. Local agencies may publish a different index
+      (for example the European Air Quality Index), so their numbers will not match.</dd>
+    <dt>Times</dt>
+    <dd>Shown in the selected location’s time zone (${esc(tzOf())}).</dd>
     <dt>Map</dt>
     <dd>Base map: Esri Gray Canvas (Esri, HERE, Garmin, © OpenStreetMap contributors). Falls back to OpenStreetMap tiles if Esri is unreachable.</dd>
+    <dt>Place search</dt>
+    <dd><a href="https://open-meteo.com/en/docs/geocoding-api" target="_blank" rel="noopener">Open-Meteo Geocoding</a>, based on GeoNames (CC BY 4.0).</dd>
+    <dt>Privacy</dt>
+    <dd>Your chosen location and recent searches are saved only in this browser. To get readings, the location’s coordinates
+      (rounded to about 100 m) are sent to Open-Meteo; in North America, a box roughly 200 km across that contains it is also sent to EPA’s AirNow feed.
+      Searches send the text you type to Open-Meteo. Map tiles for the area on screen come from Esri, or OpenStreetMap as a fallback.</dd>
   </dl>`;
 }
 
@@ -311,6 +357,10 @@ function legendHTML(r) {
     const status = M.status === 'loading' ? '<p class="lg-note">Loading monitors…</p>'
       : M.status === 'error' ? `<p class="lg-note">Monitor feed unavailable. <button class="btn btn-retry sm" type="button" data-retry="monitors">Retry</button></p>`
       : !r.isNow ? '<p class="lg-note">Monitors show their latest hour only; place estimates follow the selected hour.</p>' : '';
+    if (M.status === 'none') {
+      return `<p class="lg-row"><span class="lg-key lg-est lg-first" aria-hidden="true"></span>Model estimate</p>${S.hint ? `<p class="lg-note">${S.hint}</p>` : ''}
+        <p class="lg-note">No AirNow monitors outside North America.</p>`;
+    }
     return `<p class="lg-row"><span class="lg-key lg-mon" aria-hidden="true"></span>Monitor, measured
       <span class="lg-key lg-est" aria-hidden="true"></span>Model estimate</p>${S.hint ? `<p class="lg-note">${S.hint}</p>` : ''}${status}`;
   }
@@ -319,15 +369,39 @@ function legendHTML(r) {
   const status = F.status === 'loading' ? '<p class="lg-note">Loading model field…</p>'
     : F.status === 'error' ? `<p class="lg-note">Model field unavailable: ${esc(F.error)}. <button class="btn btn-retry sm" type="button" data-retry="field">Retry</button></p>`
     : fieldIndex() < 0 ? '<p class="lg-note">The regional field covers 2 days back to 4 days ahead. Pick an hour in that range.</p>' : '';
-  return `<p class="lg-row">CAMS model · ~40 km cells · shown as-is, not interpolated</p><p class="lg-row lg-cats">${keys}</p>${status}`;
+  const d = DOMAINS[F.data?.domain] || domainFor(S.place.lat, S.place.lon);
+  return `<p class="lg-row">${d.id === 'cams_europe' ? 'CAMS Europe model' : 'CAMS model'} · ${d.km} cells · shown as-is, not interpolated</p><p class="lg-row lg-cats">${keys}</p>${status}`;
 }
 
 // ---- wiring -------------------------------------------------------------------
 const tlHome = new Timeline($('#tlHome'), { onSelect: selectIdx, height: 176 });
 const tlSheet = new Timeline($('#tlSheet'), { onSelect: selectIdx, height: 150 });
-const explorer = new Explorer($('#map'), { onSelect: p => setPlace(p) });
+const explorer = new Explorer($('#map'), { onSelect: p => setPlace(p), bounds: viewBounds(S.place.lat, S.place.lon) });
 let preview = null;
-try { preview = new Preview($('#previewMap')); } catch {}
+try { preview = new Preview($('#previewMap'), viewBounds(S.place.lat, S.place.lon)); } catch {}
+
+// Model-estimate markers for the map: Bay Area shortcuts, recent searches and the selected
+// place, limited to the model field around the selection so nothing from a previous region lingers.
+function placeMarkers(fIdx) {
+  const spec = S.field.data || fieldSpec(S.place.lat, S.place.lon);
+  const h = spec.step / 2;
+  const lats = spec.cells.map(c => c.lat), lons = spec.cells.map(c => c.lon);
+  const box = [Math.min(...lats) - h, Math.min(...lons) - h, Math.max(...lats) + h, Math.max(...lons) + h];
+  const inside = p => p.lat >= box[0] && p.lat <= box[2] && p.lon >= box[1] && p.lon <= box[3];
+  const cand = [
+    ...PLACES.map(p => ({ ...p, place: { kind: 'preset', ...p } })),
+    ...S.recent.map(p => ({ name: p.name, lat: p.lat, lon: p.lon, place: p })),
+  ];
+  if (S.place.kind !== 'monitor') cand.unshift({ name: placeLabel(S.place), lat: S.place.lat, lon: S.place.lon, place: S.place });
+  const out = [];
+  for (const p of cand) {
+    if (!inside(p) || out.some(o => o.lat === p.lat && o.lon === p.lon) || nearest(out, p.lat, p.lon, 1)) continue;
+    // A named place sitting on top of a reporting monitor adds clutter, not information.
+    if (nearest(S.monitors.list, p.lat, p.lon, 4, m => m.aqi != null)) continue;
+    out.push({ ...p, value: fIdx < 0 ? null : fieldValueAt(S.field.data, p.lat, p.lon, fIdx) });
+  }
+  return out;
+}
 
 function selectIdx(i) {
   const mi = modelInfo();
@@ -340,6 +414,8 @@ function selectIdx(i) {
 function render() {
   const r = vm();
   const label = placeLabel(S.place);
+  $('#plateModel').textContent = `US AQI · ${regionLabel(S.place)}`;
+  $('#lgMeas').hidden = S.monitors.status === 'none';
   $('#placeName').textContent = label;
   $('#sheetName').textContent = label;
   $('#sheetKind').textContent = placeKind(S.place);
@@ -370,10 +446,7 @@ function render() {
     const fIdx = fieldIndex();
     explorer.draw({
       field: S.field.data, fieldIdx: fIdx, monitors: S.monitors.list, isNow: r.isNow, place: S.place,
-      // A named place sitting on top of a reporting monitor adds clutter, not information.
-      places: PLACES
-        .filter(p => !nearest(S.monitors.list, p.lat, p.lon, 4, m => m.aqi != null))
-        .map(p => ({ ...p, value: fIdx < 0 ? null : fieldValueAt(S.field.data, p.lat, p.lon, fIdx) })),
+      places: placeMarkers(fIdx),
     });
     $('#exLegend').innerHTML = legendHTML(r);
     const et = $('#exTime');
@@ -400,33 +473,69 @@ async function loadModel() {
   render();
 }
 
+// Each loader keeps a token so a slow response for a previous location is dropped, not drawn.
+let monToken = 0;
 async function loadMonitors() {
-  S.monitors = { ...S.monitors, status: 'loading', error: null };
+  const t = ++monToken;
+  const p = S.place;
+  if (!airnowCovers(p.lat, p.lon)) {
+    S.monitors = { status: 'none', list: [], data: null, error: null, bbox: null };
+    render();
+    return;
+  }
+  const bbox = monitorBox(p.lat, p.lon);
+  const same = S.monitors.bbox?.join() === bbox.join();
+  S.monitors = { status: 'loading', list: same ? S.monitors.list : [], data: same ? S.monitors.data : null, error: null, bbox };
   render();
   try {
-    const d = await fetchMonitors();
-    S.monitors = { status: 'ok', list: d.list, data: d, error: null };
+    const d = await fetchMonitors(bbox);
+    if (t !== monToken) return;
+    S.monitors = { status: 'ok', list: d.list, data: d, error: null, bbox };
   } catch (e) {
-    S.monitors = { status: 'error', list: [], data: null, error: e.message || 'request failed' };
+    if (t !== monToken) return;
+    S.monitors = { status: 'error', list: [], data: null, error: e.message || 'request failed', bbox };
   }
   render();
 }
 
+let fieldToken = 0;
 async function loadField() {
-  if (S.field.status === 'loading') return;
-  S.field = { status: 'loading', data: S.field.data, error: null };
+  const t = ++fieldToken;
+  const spec = fieldSpec(S.place.lat, S.place.lon);
+  S.field = { status: 'loading', data: null, error: null };
   render();
-  try { S.field = { status: 'ok', data: await fetchField(), error: null }; }
-  catch (e) { S.field = { status: 'error', data: null, error: e.message || 'request failed' }; }
+  try {
+    const d = await fetchField(spec);
+    if (t !== fieldToken) return;
+    S.field = { status: 'ok', data: d, error: null };
+  } catch (e) {
+    if (t !== fieldToken) return;
+    S.field = { status: 'error', data: null, error: e.message || 'request failed' };
+  }
   render();
 }
 
-function setPlace(p) {
+function remember(p) {
+  S.recent = [p, ...S.recent.filter(x => !(x.name === p.name && x.lat === p.lat && x.lon === p.lon))].slice(0, RECENT_MAX);
+  store.set('aqi.recent', S.recent);
+  renderRecent();
+}
+
+// recenter: frame the map on the new place (chooser selections). Taps on the map leave it where it is.
+function setPlace(p, { recenter = false } = {}) {
   if (p.kind === 'point' || p.kind === 'gps') p = { ...p, lat: +p.lat.toFixed(3), lon: +p.lon.toFixed(3) };
   S.place = p;
   S.hint = null;
   store.set('aqi.place', p);
+  if (p.kind === 'search') remember(p);
+  if (!fieldHolds(S.field.data, p.lat, p.lon)) { fieldToken++; S.field = { status: 'idle', data: null, error: null }; }
+  const M = S.monitors;
+  if (!((M.status === 'ok' || M.status === 'loading') && boxHolds(M.bbox, p.lat, p.lon))) loadMonitors();
+  const b = viewBounds(p.lat, p.lon);
+  preview?.focus(b);
+  if (recenter) explorer.focus(b);
   loadModel();
+  if (!$('#explorer').hidden && S.field.status === 'idle') loadField();
 }
 
 // Explorer open/close, with history so the iOS back gesture works.
@@ -442,6 +551,7 @@ function openExplorer() {
 }
 function hideExplorer() {
   $('#explorer').hidden = true;
+  explorer.hide();
   $('#home').inert = false;
   document.body.classList.remove('ex-open');
   S.hint = null;
@@ -523,13 +633,23 @@ $('#sheetToggle').addEventListener('click', () => setSheet(S.sheet === 'expanded
 
 // ---- place dialog -------------------------------------------------------------
 const dlg = $('#placeDialog');
+const q = $('#placeQuery');
+const GPS_NOTE = 'Sends coordinates to the air-quality services';
+const placeRow = (attr, name, note) =>
+  `<button class="row-btn" type="button" ${attr}><span class="row-main">${esc(name)}</span>${note ? `<span class="row-note">${esc(note)}</span>` : ''}</button>`;
 $('#placeList').innerHTML = PLACES.map((p, i) => `<button class="row-btn" type="button" data-place="${i}">${p.name}</button>`).join('');
-$('#placeBtn').addEventListener('click', () => dlg.showModal());
+$('#placeBtn').addEventListener('click', () => { renderSearch(); dlg.showModal(); });
+$('#placeClose').addEventListener('click', () => dlg.close());
+dlg.addEventListener('close', () => {
+  clearTimeout(searchTimer); searchCtl?.abort(); searchSeq++;
+  q.value = '';
+  S.search = { q: '', status: 'idle', results: [], error: null };
+  renderSearch();
+});
+function choose(p) { setPlace(p, { recenter: true }); dlg.close(); }
 $('#placeList').addEventListener('click', e => {
   const b = e.target.closest('[data-place]');
-  if (!b) return;
-  setPlace({ kind: 'preset', ...PLACES[+b.dataset.place] });
-  dlg.close();
+  if (b) choose({ kind: 'preset', ...PLACES[+b.dataset.place] });
 });
 $('#pickOnMap').addEventListener('click', () => {
   dlg.close();
@@ -542,10 +662,104 @@ $('#useGps').addEventListener('click', () => {
   if (!navigator.geolocation) { note.textContent = 'Location is not available in this browser'; return; }
   note.textContent = 'Locating…';
   navigator.geolocation.getCurrentPosition(
-    pos => { note.textContent = 'Stays on this device'; dlg.close(); setPlace({ kind: 'gps', lat: pos.coords.latitude, lon: pos.coords.longitude }); },
+    pos => { note.textContent = GPS_NOTE; choose({ kind: 'gps', lat: pos.coords.latitude, lon: pos.coords.longitude }); },
     err => { note.textContent = err.code === 1 ? 'Location permission was denied' : 'Could not get a location'; },
     { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 },
   );
+});
+
+// Worldwide search (Open-Meteo Geocoding). Debounced; each keystroke cancels the request
+// before it, and a sequence number drops any answer that arrives late.
+let searchTimer = 0, searchCtl = null, searchSeq = 0;
+const searchCache = new Map();
+const coordText = (lat, lon) =>
+  `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? 'N' : 'S'} ${Math.abs(lon).toFixed(2)}°${lon >= 0 ? 'E' : 'W'}`;
+
+// Region line that tells same-named places apart: state/province and country, plus the
+// county when two results share both, plus coordinates if even that is not enough.
+function regionOf(r, all) {
+  const twins = all.filter(x => x !== r && x.name === r.name && x.admin1 === r.admin1 && x.country === r.country);
+  const parts = [r.admin1, r.country];
+  if (twins.length && r.admin2) parts.unshift(r.admin2);
+  if (twins.some(x => x.admin2 === r.admin2)) parts.push(coordText(r.lat, r.lon));
+  return parts.filter((x, i, a) => x && x !== r.name && a.indexOf(x) === i).join(', ') || coordText(r.lat, r.lon);
+}
+
+async function runSearch() {
+  clearTimeout(searchTimer);
+  searchCtl?.abort();
+  const seq = ++searchSeq;
+  const text = q.value.trim();
+  if (text.split(',')[0].trim().length < 2) {
+    S.search = { q: text, status: text ? 'short' : 'idle', results: [], error: null };
+    renderSearch();
+    return;
+  }
+  const key = text.toLowerCase();
+  if (searchCache.has(key)) {
+    S.search = { q: text, status: 'ok', results: searchCache.get(key), error: null };
+    renderSearch();
+    return;
+  }
+  S.search = { q: text, status: 'loading', results: [], error: null };
+  renderSearch();
+  searchCtl = new AbortController();
+  try {
+    const list = await searchPlaces(text, searchCtl.signal);
+    if (seq !== searchSeq) return;
+    const results = list.map((r, _, all) => ({ ...r, region: regionOf(r, all) }));
+    searchCache.set(key, results);
+    S.search = { q: text, status: 'ok', results, error: null };
+  } catch (e) {
+    if (seq !== searchSeq) return;
+    S.search = { q: text, status: 'error', results: [], error: e.message || 'request failed' };
+  }
+  renderSearch();
+}
+
+function renderSearch() {
+  const { q: text, status, results, error } = S.search;
+  const st = $('#searchStatus');
+  st.dataset.state = status;
+  st.innerHTML = status === 'idle' ? 'Any city or town worldwide. Narrow it with a comma: “Paris, France”.'
+    : status === 'short' ? 'Type at least 2 letters.'
+    : status === 'loading' ? 'Searching…'
+    : status === 'error' ? `Search is unavailable right now (${esc(error)}). Current location, the map and Bay Area places still work.
+        <button class="btn btn-retry sm" type="button" data-retry-search>Retry</button>`
+    : results.length ? `${results.length} place${results.length === 1 ? '' : 's'} found`
+    : `No places found for “${esc(text)}”. Check the spelling, or try a larger town nearby.`;
+  $('#searchResults').innerHTML = status === 'ok'
+    ? results.map((r, i) => placeRow(`data-result="${i}"`, r.name, r.region)).join('') : '';
+}
+
+function renderRecent() {
+  $('#recentLabel').hidden = !S.recent.length;
+  $('#recentList').innerHTML = S.recent.map((p, i) => placeRow(`data-recent="${i}"`, p.name, p.region)).join('');
+}
+renderRecent();
+
+// Results for the previous text are withdrawn as soon as the text changes, so a tap can't land on a stale row.
+q.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  const text = q.value.trim();
+  if (text.split(',')[0].trim().length >= 2) {
+    S.search = { q: text, status: 'loading', results: [], error: null };
+    renderSearch();
+  }
+  searchTimer = setTimeout(runSearch, 300);
+});
+// Enter / the keyboard's Search key: search now and drop the keyboard so results are visible.
+$('#placeForm').addEventListener('submit', e => { e.preventDefault(); runSearch(); q.blur(); });
+dlg.addEventListener('click', e => {
+  if (e.target.closest('[data-retry-search]')) { searchCache.delete(S.search.q.toLowerCase()); runSearch(); return; }
+  const res = e.target.closest('[data-result]');
+  if (res) {
+    const r = S.search.results[+res.dataset.result];
+    if (r) choose({ kind: 'search', id: r.id, name: r.name, region: r.region, country: r.country, tz: r.tz, lat: r.lat, lon: r.lon });
+    return;
+  }
+  const rec = e.target.closest('[data-recent]');
+  if (rec) { const p = S.recent[+rec.dataset.recent]; if (p) choose(p); }
 });
 
 // ---- boot ---------------------------------------------------------------------

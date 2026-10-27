@@ -11,7 +11,6 @@ const esriUrl = part => `${ESRI}/World_${dark.matches ? 'Dark' : 'Light'}_Gray_$
 const ESRI_ATTR = 'Esri, HERE, Garmin, © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, and the GIS user community';
 const OSM_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 const OSM_ATTR = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-export const BAY_BOUNDS = [[37.15, -122.85], [38.55, -121.65]];
 
 function baseMap(el, opts, attribution) {
   const map = L.map(el, { zoomSnap: 0.5, attributionControl: false, ...opts });
@@ -57,12 +56,13 @@ function icon(cls, v, title) {
 //   locations: AirNow monitors (solid) + model estimates at named places (hollow)
 //   field:     CAMS model cells drawn at native size, not interpolated
 export class Explorer {
-  constructor(el, { onSelect }) {
+  constructor(el, { onSelect, bounds }) {
     this.el = el;
     this.onSelect = onSelect;
     this.mode = 'locations';
     this.map = null;
     this.hitTargets = [];
+    this.pending = bounds;
   }
 
   ensure() {
@@ -71,7 +71,7 @@ export class Explorer {
     this.map = baseMap(this.el, { zoomControl: false, tapTolerance: 20 }, attr);
     attr.addTo(this.map);
     L.control.zoom({ position: 'topright' }).addTo(this.map);
-    this.map.fitBounds(BAY_BOUNDS);
+    this.map.fitBounds(this.pending);
     this.layers = {
       field: L.layerGroup(), fieldLabels: L.layerGroup(),
       monitors: L.layerGroup(), places: L.layerGroup(), sel: L.layerGroup().addTo(this.map),
@@ -80,7 +80,21 @@ export class Explorer {
     this.map.on('zoomend', () => this.syncLabels());
   }
 
-  show() { this.ensure(); requestAnimationFrame(() => this.map.invalidateSize()); }
+  show() {
+    this.ensure();
+    this.visible = true;
+    requestAnimationFrame(() => {
+      this.map.invalidateSize();
+      if (this.pending) { this.map.fitBounds(this.pending); this.pending = null; }
+    });
+  }
+  hide() { this.visible = false; }
+
+  // Frame a new location. A hidden map has no size, so framing waits for show().
+  focus(bounds) {
+    this.pending = bounds;
+    if (this.map && this.visible) { this.map.fitBounds(bounds); this.pending = null; }
+  }
 
   // Forgiving selection: a tap within 32 px of any marker selects that marker.
   handleTap(e) {
@@ -130,7 +144,7 @@ export class Explorer {
 
     if (this.mode === 'locations') {
       for (const p of places) {
-        const pl = { kind: 'preset', name: p.name, lat: p.lat, lon: p.lon };
+        const pl = p.place || { kind: 'preset', name: p.name, lat: p.lat, lon: p.lon };
         L.marker([p.lat, p.lon], { icon: icon('mk-est', p.value, `${p.name}: model estimate`), keyboard: false, interactive: false })
           .addTo(Ls.places);
         this.hitTargets.push({ lat: p.lat, lon: p.lon, place: pl });
@@ -152,21 +166,26 @@ export class Explorer {
     }
   }
 
+  // Cell values are labelled only when a cell is wide enough on screen to hold one.
   syncLabels() {
     if (!this.map || this.mode !== 'field') return;
-    const on = this.map.getZoom() >= 8;
+    const step = this.last?.field?.step ?? 0.4;
+    const c = this.map.getCenter();
+    const a = this.map.latLngToContainerPoint(c), b = this.map.latLngToContainerPoint([c.lat, c.lng + step]);
+    const on = Math.abs(b.x - a.x) >= 34;
     if (on) this.layers.fieldLabels.addTo(this.map); else this.layers.fieldLabels.remove();
   }
 }
 
 // Small non-interactive preview on the home console.
 export class Preview {
-  constructor(el) {
+  constructor(el, bounds) {
     this.map = baseMap(el, {
       zoomControl: false, dragging: false, touchZoom: false, scrollWheelZoom: false,
       doubleClickZoom: false, boxZoom: false, keyboard: false, tap: false,
     });
-    this.map.fitBounds(BAY_BOUNDS);
+    this.bounds = bounds;
+    this.map.fitBounds(bounds);
     this.layer = L.layerGroup().addTo(this.map);
   }
   draw({ monitors, place }) {
@@ -179,5 +198,6 @@ export class Preview {
       L.circleMarker([place.lat, place.lon], { radius: 9, weight: 3, color: tok('--accent'), fill: false, interactive: false }).addTo(this.layer);
     }
   }
-  invalidate() { this.map.invalidateSize(); this.map.fitBounds(BAY_BOUNDS); }
+  focus(bounds) { this.bounds = bounds; this.map.fitBounds(bounds); }
+  invalidate() { this.map.invalidateSize(); this.map.fitBounds(this.bounds); }
 }

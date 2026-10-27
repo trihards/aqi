@@ -1,14 +1,18 @@
 # AQI Observatory
 
-Mobile-first air-quality prototype for the San Francisco Bay Area. Static site in `web/`: plain HTML/CSS/ES modules, no build step, no keys, no backend.
+Mobile-first air-quality prototype. Started in the San Francisco Bay Area (still the default, with shortcuts); any city worldwide can be searched, picked on the map, or taken from GPS. Static site in `web/`: plain HTML/CSS/ES modules, no build step, no keys, no backend.
 
 ## Data
 
 | Source | Used for | Nature |
 | --- | --- | --- |
-| [Open-Meteo Air Quality](https://open-meteo.com/en/docs/air-quality-api) (CAMS global, ~40 km) | Timeline (3 days back, ~5 ahead), pollutant breakdown, regional field | Model. Past hours are model values, not observations. CC BY 4.0 |
-| EPA AirNow, via EPA's public ArcGIS feed "Air Now Current Monitor Data Public" | Monitor markers, "Measured" readings | Observed, latest hour only, preliminary |
+| [Open-Meteo Air Quality](https://open-meteo.com/en/docs/air-quality-api), CAMS Europe (`domains=cams_europe`) | Inside 30–72°N, 25°W–45°E: timeline (3 days back, ~4 ahead), pollutants, map field | Model, 0.1° cells (~10 km). CC BY 4.0 |
+| Open-Meteo Air Quality, CAMS global (`domains=cams_global`) | Everywhere else: same, ~5 days ahead | Model, 0.4° cells (~40 km). CC BY 4.0 |
+| [Open-Meteo Geocoding](https://open-meteo.com/en/docs/geocoding-api) | Place search | GeoNames. CC BY 4.0 |
+| EPA AirNow, via EPA's public ArcGIS feed "Air Now Current Monitor Data Public" | Monitor markers, "Measured" readings; queried only in North America, ±1° around the place | Observed, latest hour only, preliminary |
 | Esri Light/Dark Gray Canvas (keyless; OSM fallback) | Map tiles | Esri, HERE, Garmin, © OpenStreetMap contributors |
+
+Model grids were checked against Open-Meteo's source (`Sources/App/Cams/CamsDomain.swift`): CAMS global cell centres sit on multiples of 0.4°, CAMS Europe centres on x.x5° within the European domain. The app names the domain and uses `cell_selection=nearest`, and computes cell positions itself, because the coordinates Open-Meteo echoes back come from an auxiliary grid. The map field is a block of native cells around the selected place (7×9 global, 9×11 Europe), fetched in one multi-coordinate call. All values are US AQI (EPA scale), including outside the US.
 
 OpenAQ was evaluated and not used: its API does not allow browser (CORS) requests and needs a key, so it would require a proxy. The AirNow REST API needs a key too.
 
@@ -20,6 +24,8 @@ OpenAQ was evaluated and not used: its API does not allow browser (CORS) request
 
     npm install
     npm test        # Playwright smoke test with synthetic API fixtures; screenshots go to test-output/
+
+If the pinned Playwright's browser isn't installed, point the test at an existing Chromium: `PW_CHROMIUM=/path/to/chromium npm test`.
 
 ## Deploy
 

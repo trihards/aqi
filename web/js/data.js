@@ -1,16 +1,93 @@
 // Data access. Everything runs in the browser; no keys, no backend.
-//   Model:    Open-Meteo Air Quality API (CAMS global, ~40 km grid). CORS-enabled, CC BY 4.0.
+//   Model:    Open-Meteo Air Quality API (CAMS global ~40 km; CAMS Europe ~10 km). CORS-enabled, CC BY 4.0.
+//   Places:   Open-Meteo Geocoding API (GeoNames). CORS-enabled, CC BY 4.0.
 //   Monitors: U.S. EPA AirNow latest-hour site data, published by EPA as a public
 //             ArcGIS Online feature service (CORS-enabled, keyless).
 
 const OM_URL = 'https://air-quality-api.open-meteo.com/v1/air-quality';
+const GEO_URL = 'https://geocoding-api.open-meteo.com/v1/search';
 const AIRNOW_URL =
   'https://services.arcgis.com/cJ9YHowT8TU7DUyn/arcgis/rest/services/Air%20Now%20Current%20Monitor%20Data%20Public/FeatureServer/0/query';
 
-export const MONITOR_BBOX = [-123.3, 36.9, -121.2, 38.9]; // lon/lat, Bay Area + margin
-export const FIELD_STEP = 0.4;                             // degrees; matches CAMS global spacing
-const FIELD_LATS = range(36.6, 39.4, FIELD_STEP);
-const FIELD_LONS = range(-123.8, -120.6, FIELD_STEP);
+// CAMS grids as Open-Meteo stores them (open-meteo/open-meteo, Sources/App/Cams/CamsDomain.swift):
+//   cams_global  0.4° regular grid, cell centres on multiples of 0.4°, 121 forecast hours.
+//   cams_europe  0.1° grid, centres 30.05–71.95°N and 24.95°W–44.95°E (x.x5), 97 forecast hours.
+// Requests name the domain explicitly and use cell_selection=nearest, so the point reading and
+// the map field come from the same cells. The lat/lon Open-Meteo echoes back belongs to an
+// auxiliary grid, so cell positions are computed here instead of read from the response.
+// rows/cols: field half-size in cells (global 7×9 cells, Europe 9×11); view: map half-height in degrees.
+export const DOMAINS = {
+  cams_global: { id: 'cams_global', name: 'CAMS global', step: 0.4, lat0: -90, lon0: -180, nLat: 451, nLon: 900, wrap: true,
+    km: '~40 km', rows: 3, cols: 4, view: 0.7 },
+  cams_europe: { id: 'cams_europe', name: 'CAMS Europe', step: 0.1, lat0: 30.05, lon0: -24.95, nLat: 420, nLon: 700, wrap: false,
+    km: '~10 km', rows: 4, cols: 5, view: 0.35 },
+};
+export const domainFor = (lat, lon) =>
+  (lat >= 30 && lat < 72 && lon >= -25 && lon < 45 ? DOMAINS.cams_europe : DOMAINS.cams_global);
+
+const normLon = lon => ((((lon + 180) % 360) + 360) % 360) - 180;
+const clampIdx = (i, n) => Math.max(0, Math.min(n - 1, i));
+
+// Native model cell containing a point: { domain, i, j, lat, lon } (centre, degrees).
+export function modelCell(lat, lon) {
+  const d = domainFor(lat, lon);
+  const i = clampIdx(Math.round((lat - d.lat0) / d.step), d.nLat);
+  let j = Math.round((normLon(lon) - d.lon0) / d.step);
+  j = d.wrap ? ((j % d.nLon) + d.nLon) % d.nLon : clampIdx(j, d.nLon);
+  return { domain: d, i, j, lat: +(d.lat0 + i * d.step).toFixed(2), lon: +normLon(d.lon0 + j * d.step).toFixed(2) };
+}
+
+// Block of native cells around a point. `lon` is kept continuous with the point for drawing
+// across the antimeridian; `qlon` is the normalised value sent to the API.
+export function fieldSpec(lat, lon) {
+  const c = modelCell(lat, lon), d = c.domain;
+  const base = c.lon + 360 * Math.round((lon - c.lon) / 360);
+  const cells = [];
+  for (let i = c.i - d.rows; i <= c.i + d.rows; i++) {
+    if (i < 0 || i >= d.nLat) continue;
+    for (let dj = -d.cols; dj <= d.cols; dj++) {
+      const j = c.j + dj;
+      if (!d.wrap && (j < 0 || j >= d.nLon)) continue;
+      const la = +(d.lat0 + i * d.step).toFixed(2);
+      const lo = +(base + dj * d.step).toFixed(2);
+      cells.push({ lat: la, lon: lo, qlat: la, qlon: +normLon(lo).toFixed(2) });
+    }
+  }
+  return { domain: d.id, step: d.step, key: `${d.id}:${c.i},${c.j}`, ci: c.i, cj: c.j, cells };
+}
+
+// True when a point sits well inside an already loaded field, so it can be reused.
+export function fieldHolds(field, lat, lon) {
+  if (!field) return false;
+  const c = modelCell(lat, lon), d = c.domain;
+  if (d.id !== field.domain) return false;
+  let dj = c.j - field.cj;
+  if (d.wrap) dj = ((dj + d.nLon / 2) % d.nLon + d.nLon) % d.nLon - d.nLon / 2;
+  return Math.abs(c.i - field.ci) <= Math.max(1, d.rows - 2) && Math.abs(dj) <= Math.max(1, d.cols - 2);
+}
+
+// Map framing around a point; same aspect as the original Bay Area view.
+export function viewBounds(lat, lon) {
+  const h = domainFor(lat, lon).view;
+  const w = (h * 0.676) / Math.max(0.2, Math.cos((lat * Math.PI) / 180));
+  return [[lat - h, lon - w], [lat + h, lon + w]];
+}
+
+export const BAY_BOX = [-123.3, 36.9, -121.2, 38.9]; // lon/lat, Bay Area + margin
+export const inBayArea = (lat, lon) => lon >= BAY_BOX[0] && lon <= BAY_BOX[2] && lat >= BAY_BOX[1] && lat <= BAY_BOX[3];
+
+// The AirNow feed is queried only in North America (US, Canada, Mexico and nearby).
+// Elsewhere the app does not ask, and says monitors are not available rather than failing.
+const AIRNOW_REGION = [-170, 14, -50, 72];
+export const airnowCovers = (lat, lon) =>
+  lon >= AIRNOW_REGION[0] && lon <= AIRNOW_REGION[2] && lat >= AIRNOW_REGION[1] && lat <= AIRNOW_REGION[3];
+// Monitor query box: ±1° lat, ±1.25° lon around a 0.5° snapped centre (keeps cache keys stable).
+export function monitorBox(lat, lon) {
+  const la = Math.round(lat * 2) / 2, lo = Math.round(lon * 2) / 2;
+  return [lo - 1.25, la - 1, lo + 1.25, la + 1];
+}
+export const boxHolds = (b, lat, lon, m = 0.4) =>
+  !!b && lon >= b[0] + m && lon <= b[2] - m && lat >= b[1] + m && lat <= b[3] - m;
 
 export const PLACES = [
   { name: 'San Francisco', lat: 37.7749, lon: -122.4194 },
@@ -30,15 +107,12 @@ export const PLACES = [
   { name: 'Half Moon Bay', lat: 37.4636, lon: -122.4286 },
 ];
 
-function range(a, b, step) {
-  const out = [];
-  for (let v = a; v <= b + 1e-9; v += step) out.push(+v.toFixed(3));
-  return out;
-}
-
-async function getJSON(url, timeoutMs = 15000) {
+async function getJSON(url, timeoutMs = 15000, signal) {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, timeoutMs);
+  const relay = () => ctl.abort();
+  if (signal?.aborted) ctl.abort(); else signal?.addEventListener('abort', relay);
   try {
     const res = await fetch(url, { signal: ctl.signal });
     if (!res.ok) {
@@ -48,10 +122,11 @@ async function getJSON(url, timeoutMs = 15000) {
     }
     return await res.json();
   } catch (e) {
-    if (e.name === 'AbortError') throw new Error(`No response after ${timeoutMs / 1000} s`);
+    if (e.name === 'AbortError' && timedOut) throw new Error(`No response after ${timeoutMs / 1000} s`);
     throw e;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', relay);
   }
 }
 
@@ -74,9 +149,10 @@ const HOURLY = [
 
 export function fetchModel(lat, lon) {
   const la = lat.toFixed(3), lo = lon.toFixed(3);
-  return cached(`om:${la},${lo}`, 10 * 60e3, async () => {
+  const cell = modelCell(lat, lon);
+  return cached(`om2:${cell.domain.id}:${la},${lo}`, 10 * 60e3, async () => {
     const q = new URLSearchParams({
-      latitude: la, longitude: lo, hourly: HOURLY.join(','),
+      latitude: la, longitude: lo, hourly: HOURLY.join(','), domains: cell.domain.id, cell_selection: 'nearest',
       past_days: '3', forecast_days: '5', timezone: 'auto', timeformat: 'unixtime',
     });
     const j = await getJSON(`${OM_URL}?${q}`);
@@ -84,34 +160,52 @@ export function fetchModel(lat, lon) {
     const series = {};
     for (const k of HOURLY) series[k] = j.hourly[k] || [];
     return {
-      lat: j.latitude, lon: j.longitude, tz: j.timezone || 'America/Los_Angeles',
+      domain: cell.domain.id, cellLat: cell.lat, cellLon: cell.lon, tz: j.timezone || 'GMT',
       times: j.hourly.time, series, units: j.hourly_units || {}, fetchedAt: Date.now(),
     };
   });
 }
 
-// Regional field: one hourly us_aqi series per CAMS grid cell, requested in a single
-// multi-coordinate call. Cells are drawn as-is; nothing is interpolated.
-export function fetchField() {
-  return cached('om:field:v1', 20 * 60e3, async () => {
-    const lats = [], lons = [];
-    for (const la of FIELD_LATS) for (const lo of FIELD_LONS) { lats.push(la); lons.push(lo); }
+// Model field: one hourly us_aqi series per native CAMS cell around the selected place,
+// requested in a single multi-coordinate call (responses come back in request order).
+// Cells are drawn as-is; nothing is interpolated.
+export function fetchField(spec) {
+  return cached(`om2:field:${spec.key}`, 20 * 60e3, async () => {
     const q = new URLSearchParams({
-      latitude: lats.join(','), longitude: lons.join(','), hourly: 'us_aqi',
+      latitude: spec.cells.map(c => c.qlat).join(','), longitude: spec.cells.map(c => c.qlon).join(','),
+      hourly: 'us_aqi', domains: spec.domain, cell_selection: 'nearest',
       past_days: '2', forecast_days: '4', timezone: 'GMT', timeformat: 'unixtime',
     });
     const j = await getJSON(`${OM_URL}?${q}`, 25000);
     const arr = Array.isArray(j) ? j : [j];
-    const seen = new Set();
-    const cells = [];
-    for (const r of arr) {
-      const key = `${r.latitude.toFixed(2)},${r.longitude.toFixed(2)}`;
-      if (seen.has(key) || !r.hourly) continue;
-      seen.add(key);
-      cells.push({ lat: r.latitude, lon: r.longitude, aqi: r.hourly.us_aqi || [] });
-    }
-    return { times: arr[0]?.hourly?.time || [], cells, step: FIELD_STEP, fetchedAt: Date.now() };
+    if (arr.length !== spec.cells.length) throw new Error('Model field response did not match the request');
+    const cells = spec.cells.map((c, k) => ({ lat: c.lat, lon: c.lon, aqi: arr[k]?.hourly?.us_aqi || [] }));
+    return {
+      times: arr[0]?.hourly?.time || [], cells, step: spec.step, domain: spec.domain, key: spec.key,
+      ci: spec.ci, cj: spec.cj, fetchedAt: Date.now(),
+    };
   });
+}
+
+// ---- place search ---------------------------------------------------------------
+// The geocoder matches names only, so "Paris, France" is searched as "Paris" and the
+// part after the comma narrows the results to a matching region or country.
+export async function searchPlaces(text, signal) {
+  const [name, ...rest] = text.split(',');
+  const q = new URLSearchParams({ name: name.trim(), count: '10', language: 'en', format: 'json' });
+  const j = await getJSON(`${GEO_URL}?${q}`, 10000, signal);
+  let list = (j.results || [])
+    .filter(r => Number.isFinite(r.latitude) && Number.isFinite(r.longitude) && r.name)
+    .map(r => ({
+      id: r.id, name: r.name, lat: r.latitude, lon: r.longitude, tz: r.timezone || null,
+      admin1: r.admin1 || null, admin2: r.admin2 || null, country: r.country || null, cc: r.country_code || null,
+    }));
+  const qual = rest.join(',').trim().toLowerCase();
+  if (qual) {
+    const hit = list.filter(r => [r.admin1, r.admin2, r.country, r.cc].some(x => x && x.toLowerCase().startsWith(qual)));
+    if (hit.length) list = hit;
+  }
+  return list;
 }
 
 // ---- AirNow monitors -----------------------------------------------------------
@@ -156,10 +250,10 @@ function parseTime(raw, fieldName) {
   return Number.isNaN(t) ? null : t;
 }
 
-export function fetchMonitors() {
-  return cached('airnow:v1', 10 * 60e3, async () => {
+export function fetchMonitors(bbox) {
+  return cached(`airnow:v2:${bbox.join(',')}`, 10 * 60e3, async () => {
     const q = new URLSearchParams({
-      where: '1=1', geometry: MONITOR_BBOX.join(','), geometryType: 'esriGeometryEnvelope',
+      where: '1=1', geometry: bbox.join(','), geometryType: 'esriGeometryEnvelope',
       inSR: '4326', spatialRel: 'esriSpatialRelIntersects', outFields: '*',
       outSR: '4326', returnGeometry: 'true', f: 'json',
     });
@@ -190,7 +284,7 @@ export function fetchMonitors() {
         rawTime: rawTime == null ? null : String(rawTime),
       });
     }
-    return { list, fields, mapping: F, fetchedAt: Date.now() };
+    return { list, fields, mapping: F, bbox, fetchedAt: Date.now() };
   });
 }
 

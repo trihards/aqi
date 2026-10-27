@@ -76,7 +76,7 @@ button { font: inherit; color: inherit; }
   letter-spacing: .08em;
 }
 .plate-name { font-size: 12px; }
-.plate-model { font: 500 12px var(--font-data); color: var(--ink-3); letter-spacing: .04em; }
+.plate-model { font: 500 12px var(--font-data); color: var(--ink-3); letter-spacing: .04em; text-align: right; }
 
 .locbar { padding-block: 12px 4px; }
 .btn {
@@ -258,6 +258,7 @@ button { font: inherit; color: inherit; }
 .lg-key { display: inline-block; width: 14px; height: 14px; border-radius: 50%; }
 .lg-mon { background: var(--ink); }
 .lg-est { border: 2px dashed var(--ink-2); margin-left: 8px; }
+.lg-est.lg-first { margin-left: 0; }
 .ex-time {
   justify-self: start; min-height: 44px; padding: 0 14px; border: 0; border-radius: 8px;
   background: var(--accent); color: var(--accent-ink); font: 500 14px var(--font-data); cursor: pointer;
@@ -319,12 +320,14 @@ button { font: inherit; color: inherit; }
 .ro-compact .ro-main { gap: 12px; }
 
 /* dialog */
+/* Anchored near the top so the search field and its results stay above the iPhone keyboard. */
 .dialog {
   width: min(100% - 24px, 480px); max-height: 85dvh; padding: 0; border: 1px solid var(--rule); border-radius: 14px;
   background: var(--plate); color: var(--ink);
+  margin-top: max(12px, env(safe-area-inset-top, 0px)); margin-bottom: auto;
 }
 .dialog::backdrop { background: rgba(0, 0, 0, .45); }
-.dialog-inner { display: grid; padding: 10px 16px 16px; }
+.dialog-inner { display: grid; grid-template-columns: minmax(0, 1fr); padding: 10px 16px 16px; }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; }
 .dialog-head .mlabel { margin: 0; }
 .row-btn {
@@ -334,7 +337,23 @@ button { font: inherit; color: inherit; }
 }
 .row-btn:active { background: var(--well); }
 .row-note { font-size: 13px; color: var(--ink-3); }
+.row-main { overflow-wrap: anywhere; }
 .place-list { display: grid; }
+.list-label { font: 400 10px var(--font-label); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); margin: 18px 0 2px; }
+.search {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 0 12px; min-height: 48px;
+  background: var(--well); border: 1px solid var(--rule); border-radius: 10px; box-shadow: var(--shadow-in);
+}
+.search:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.search-ico { width: 16px; height: 16px; flex: none; fill: none; stroke: var(--ink-3); stroke-width: 1.8; stroke-linecap: round; }
+/* 16px+ keeps iOS Safari from zooming the page when the field is focused. */
+.search-input {
+  flex: 1; min-width: 0; width: 100%; min-height: 46px; border: 0; background: transparent; color: var(--ink);
+  font: 400 17px var(--font-ui); outline: none; -webkit-appearance: none; appearance: none;
+}
+.search-input::placeholder { color: var(--ink-3); }
+.search-status { margin: 8px 2px 4px; font-size: 13px; color: var(--ink-2); min-height: 18px; }
+.search-status[data-state="error"] { color: var(--ink); }
 
 @media (max-width: 350px) {
   .ro-num { font-size: 68px; }
