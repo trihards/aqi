@@ -55,6 +55,7 @@ const zone = ms => {
 };
 const hourLabel = ms => fmt({ weekday: 'short', hour: 'numeric' }, tzOf()).format(ms) + zone(ms);
 const clock = ms => fmt({ hour: 'numeric', minute: '2-digit' }, tzOf()).format(ms) + zone(ms);
+const hourOnly = ms => fmt({ hour: 'numeric' }, tzOf()).format(ms) + zone(ms);
 function rel(ms) {
   const m = Math.round((Date.now() - ms) / 60000);
   const a = Math.abs(m);
@@ -147,9 +148,8 @@ function vm() {
     r.modelAqi = s.us_aqi[i];
     r.phase = i > mi.nowIdx ? 'forecast' : 'estimate';
     r.modelDominant = dominantAt(s, i);
-    const back = s.us_aqi[i - 3], fwd = s.us_aqi[i + 6];
+    const back = s.us_aqi[i - 3];
     if (r.modelAqi != null && back != null) r.trend = Math.round(r.modelAqi - back);
-    if (r.modelAqi != null && fwd != null && i + 6 <= mi.hi) r.ahead = fwd;
     // The observation is compared with the model hour it falls in, not with "now", and placed on
     // the timeline at its own time (fractional hour index).
     if (monFresh) {
@@ -157,10 +157,7 @@ function vm() {
       r.obsPos = k < 0 ? (ts - mi.m.times[0]) / 3600 : k + (ts - mi.m.times[k]) / 3600;
       r.obsInRange = r.obsPos >= mi.lo && r.obsPos <= mi.hi;
       const v = k >= mi.lo && k <= mi.hi ? s.us_aqi[k] : null;
-      if (v != null) {
-        r.obsModel = { aqi: v, t: mi.m.times[k] * 1000 };
-        r.disagree = category(v).key !== category(mon.aqi).key;
-      }
+      if (v != null) r.obsModel = { aqi: v, t: mi.m.times[k] * 1000 };
     }
   }
   if (isNow && monFresh) r.primary = { aqi: mon.aqi, kind: 'measured', ts: mon.ts, dominant: mon.dominant };
@@ -197,7 +194,7 @@ function sourceText(r) {
 function freshText(r) {
   const pr = r.primary;
   if (!pr) return '';
-  if (pr.kind === 'measured') return `Observed ${clock(pr.ts)} · ${rel(pr.ts)}`;
+  if (pr.kind === 'measured') return `Reported ${clock(pr.ts)} · ${rel(pr.ts)}`;
   if (pr.kind === 'forecast') return `Forecast for ${hourLabel(pr.ts)} · ${rel(pr.ts)}`;
   if (r.isNow) return `Model hour ${clock(pr.ts)} · data fetched ${rel(S.model.fetchedAt)}`;
   return `Model estimate for ${hourLabel(pr.ts)} · ${rel(pr.ts)}`;
@@ -223,33 +220,30 @@ function pauseText(p) {
 const retryBtn = (what, sm = true) => (omPause() ? '' : `<button class="btn btn-retry${sm ? ' sm' : ''}" type="button" data-retry="${what}">Retry</button>`);
 const modelFailText = () => (S.modelPause ? pauseText(S.modelPause) : `Model data unavailable (${esc(S.modelError)}).`);
 
-// Observation and model side by side, never combined. The model value is for the hour the
-// observation falls in, so both refer to the same time.
-function altHTML(r, full) {
+// Secondary model reading under a measurement: the same layout at a smaller size, for the hour the
+// observation falls in, so the two compare directly. Never combined with the measurement.
+function modelRowHTML(r, full) {
   if (r.primary?.kind !== 'measured' || !r.obsModel) return '';
-  const c = category(r.obsModel.aqi);
+  const v = r.obsModel.aqi, c = category(v);
+  const head = `<span class="badge b-est">Model estimate</span>`;
   if (!full) {   // one line in the compact sheet
-    return `<p class="ro-alt"><span class="badge b-est">Model</span> <span class="ro-alt-t"><b>${n0(r.obsModel.aqi)}</b> ${c.short}
-      ${r.disagree ? ' · <span class="ro-diff-k">different category</span>' : `<span class="ro-alt-src">· ${clock(r.obsModel.t)} hour</span>`}</span></p>`;
+    return `<p class="ro-model ro-model-c">${head} <span class="ro-model-t"><b>${n0(v)}</b>
+      <i class="sw" style="--c:${c.hex}"></i>${c.short} <span class="ro-model-src">· ${hourOnly(r.obsModel.t)} hour</span></span></p>`;
   }
-  return `<p class="ro-alt"><span class="badge b-est">Model</span> <span><b>${n0(r.obsModel.aqi)}</b> ${c.label}
-    <span class="ro-alt-src">${modelDomain().km} cell · ${clock(r.obsModel.t)} hour</span></span></p>`;
-}
-function diffHTML(r) {
-  if (r.primary?.kind !== 'measured' || !r.disagree) return '';
-  const mc = category(r.mon.aqi), oc = category(r.obsModel.aqi);
-  const where = r.p.kind === 'monitor' ? '' : `, ${km(r.monKm)} away,`;
-  return `<p class="ro-note ro-diff">Monitor and model fall in different categories. AirNow ${esc(r.mon.name)}${where} reported
-    ${n0(r.mon.aqi)} (${mc.label}) at ${clock(r.mon.ts)}; the ${modelName()} estimates ${n0(r.obsModel.aqi)} (${oc.label})
-    for its ${modelDomain().km} cell in the ${clock(r.obsModel.t)} hour. Shown as reported, not averaged.</p>`;
+  return `<div class="ro-model">
+    <div class="ro-src">${head} <span class="ro-srctext">${DOMAINS[modelDomain().id].name} · ${modelDomain().km} cell</span></div>
+    <div class="ro-model-main">
+      <span class="ro-model-num" aria-label="US AQI ${Math.round(v)}">${Math.round(v)}</span>
+      <div class="ro-side"><span class="ro-model-cat"><i class="sw" style="--c:${c.hex}"></i>${c.label}</span>
+        <span class="ro-fresh">Model hour ${clock(r.obsModel.t)}</span></div>
+    </div>
+    ${trendHTML(r)}
+  </div>`;
 }
 
 function notesHTML(r) {
   const out = [];
   const pr = r.primary;
-  if (r.ahead != null && pr && pr.kind !== 'forecast') {
-    out.push(`Six hours later: ${n0(r.ahead)} (${category(r.ahead).label}), forecast.`);
-  }
   if (S.modelStatus === 'error') {
     out.push(`${modelFailText()} Trend, timeline and forecast are missing. ${retryBtn('model')}`);
   }
@@ -284,10 +278,10 @@ function readoutHTML(r, variant) {
       <div class="ro-side"><span class="ro-msg">${msg}</span></div></div>
       ${full ? meterHTML(null) : ''}</div>`;
   }
-  const pr = r.primary, cat = category(pr.aqi);
+  const pr = r.primary, cat = category(pr.aqi), model = modelRowHTML(r, full);
   const dom = pr.dominant ? ` · <span class="nowrap">dominant ${polLabel(pr.dominant)}</span>` : '';
   return `<div class="ro${full ? '' : ' ro-compact'}">
-    <div class="ro-src">${badge(pr.kind)}<span class="ro-srctext">${sourceText(r)}</span></div>
+    <div class="ro-src">${badge(pr.kind)} <span class="ro-srctext">${sourceText(r)}</span></div>
     <div class="ro-main">
       <span class="ro-num" aria-label="US AQI ${Math.round(pr.aqi)}">${Math.round(pr.aqi)}</span>
       <div class="ro-side">
@@ -296,9 +290,10 @@ function readoutHTML(r, variant) {
       </div>
     </div>
     <p class="ro-fresh">${freshText(r)}</p>
-    ${altHTML(r, full)}
-    ${full || !altHTML(r, false) ? trendHTML(r) : ''}
-    ${full ? meterHTML(pr.aqi) + diffHTML(r) + notesHTML(r) : ''}
+    ${model ? '' : trendHTML(r)}
+    ${full ? meterHTML(pr.aqi) : ''}
+    ${model}
+    ${full ? notesHTML(r) : ''}
   </div>`;
 }
 
@@ -310,11 +305,9 @@ function tlReadoutHTML(r) {
   }
   const v = r.modelAqi;
   const cat = category(v);
-  const meas = r.isNow && r.monFresh
-    ? `<span class="tlr-meas">Measured ${n0(r.mon.aqi)} at ${clock(r.mon.ts)}${r.obsInRange ? '' : ' (outside timeline)'}</span>` : '';
   return `<span class="tlr-time">${hourLabel(r.t)}</span>
     <span class="tlr-val">${v == null ? '—' : `<b>${Math.round(v)}</b> ${cat.short}`}</span>
-    ${badge(r.phase)}${meas}`;
+    ${badge(r.phase)}`;
 }
 
 function pollutantsHTML(r) {
@@ -370,9 +363,10 @@ function sourcesHTML() {
     <dt>How readings are chosen</dt>
     <dd>“Measured” is shown when the selected monitor, or one within ${MONITOR_RADIUS_KM} km, reported in the last 3 hours.
       Otherwise the reading is the model estimate for the grid cell. Outside North America every reading is a model estimate.
-      When a monitor reading and a model estimate both exist, they are shown separately for the same hour and never averaged;
-      if they fall in different categories the app says so, without guessing why. The timeline is model-only: the measured dot
-      sits at the observation’s own report time. Model trend is the change in modeled AQI over the previous 3 hours.
+      When both exist, the measurement is shown first and the model estimate for the same hour beneath it; they are never averaged.
+      They often differ: a monitor samples one spot, while a model cell averages a wide area and can miss local sources such as
+      traffic or smoke. A difference does not show which is right. The timeline is model-only; the dot marks the measurement at
+      its own report time. Model trend is the change in modeled AQI over the previous 3 hours.
       The air quality map draws each model cell at its native size without smoothing, so nearby towns often share a value.</dd>
     <dt>Requests</dt>
     <dd>Open-Meteo’s free service counts each map cell as a request. The air quality map keeps the cells it has loaded and fetches
@@ -488,7 +482,9 @@ function render() {
   const r = vm();
   const label = placeLabel(S.place);
   $('#plateModel').textContent = `US AQI · ${regionLabel(S.place)}`;
-  $('#lgMeas').hidden = S.monitors.status === 'none';
+  $('#lgMeas').hidden = !(r.monFresh && r.obsInRange);   // legend entry only when the dot is drawn
+  const res = modelDomain().km.replace('~', '');
+  document.querySelectorAll('#roInfo [data-res]').forEach(e => { if (e.textContent !== res) e.textContent = res; });
   $('#placeName').textContent = label;
   $('#sheetName').textContent = label;
   $('#sheetKind').textContent = placeKind(S.place);
@@ -655,6 +651,23 @@ function hideExplorer() {
   preview?.invalidate();
   render();
 }
+// "Measured vs model": a plain disclosure (button + aria-expanded), static markup so re-renders never move focus.
+const infoBtn = $('#infoBtn'), info = $('#roInfo');
+function setInfo(open, refocus = false) {
+  info.hidden = !open;
+  infoBtn.setAttribute('aria-expanded', String(open));
+  if (refocus) infoBtn.focus();
+}
+infoBtn.addEventListener('click', () => setInfo(info.hidden));
+info.addEventListener('keydown', e => { if (e.key === 'Escape') setInfo(false, true); });
+infoBtn.addEventListener('keydown', e => { if (e.key === 'Escape' && !info.hidden) setInfo(false); });
+info.querySelector('[data-info-more]').addEventListener('click', e => {
+  e.preventDefault();
+  const h = $('#lbl-src');
+  h.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+  h.focus({ preventScroll: true });
+});
+
 $('#openMap').addEventListener('click', openExplorer);
 $('#exBack').addEventListener('click', () => (history.state?.ex === 1 ? history.back() : hideExplorer()));
 addEventListener('popstate', () => { if (!$('#explorer').hidden) hideExplorer(); });

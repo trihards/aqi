@@ -138,7 +138,7 @@ export class Timeline {
     if (nowIdx >= lo && nowIdx <= hi) {
       const nx = x(nowIdx);
       out.push(`<line x1="${nx}" x2="${nx}" y1="${mt - 4}" y2="${mt + h}" class="tl-now"/>`);
-      out.push(`<text x="${nx - 4}" y="${mt - 8}" class="tl-label" text-anchor="end">MODEL · PAST</text>`);
+      out.push(`<text x="${nx - 4}" y="${mt - 8}" class="tl-label" text-anchor="end">PAST</text>`);
       if (nx < ml + w - 60) out.push(`<text x="${nx + 4}" y="${mt - 8}" class="tl-label">FORECAST</text>`);
     }
 

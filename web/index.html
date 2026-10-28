@@ -31,13 +31,26 @@
   </section>
 
   <section class="module" aria-labelledby="lbl-now">
-    <h2 id="lbl-now" class="mlabel">Reading</h2>
+    <div class="mhead">
+      <h2 id="lbl-now" class="mlabel">Reading</h2>
+      <button id="infoBtn" class="btn-info" type="button" aria-expanded="false" aria-controls="roInfo">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8.25"/><path d="M10 9v5.2"/><circle cx="10" cy="6.1" r="1.1" class="dot"/></svg>
+        <span class="btn-info-t">Measured vs model</span>
+      </button>
+    </div>
+    <div id="roInfo" class="ro-info" role="region" aria-labelledby="infoBtn" hidden>
+      <p><b>Measured</b>: an AirNow monitor’s latest hourly report from one site. Preliminary; North America only.</p>
+      <p><b>Model estimate</b>: the CAMS forecast for a grid cell about <span data-res>40 km</span> across, for a whole clock hour.</p>
+      <p>They can differ: one spot versus an area, report times up to an hour apart, local sources a model can miss.
+        A difference alone doesn’t show which is right.</p>
+      <p><a href="#lbl-src" data-info-more>Sources &amp; method</a></p>
+    </div>
     <div id="readout" class="well" aria-live="polite"></div>
   </section>
 
   <section class="module" aria-labelledby="lbl-tl">
     <div class="mhead">
-      <h2 id="lbl-tl" class="mlabel">Timeline <span class="mlabel-sub">hourly model · 3 days back, forecast ahead</span></h2>
+      <h2 id="lbl-tl" class="mlabel">Timeline <span class="mlabel-sub">hourly · 3 days back, forecast ahead</span></h2>
     </div>
     <div class="well well-tl">
       <div id="tlReadout" class="tl-readout" aria-live="polite"></div>
@@ -52,7 +65,7 @@
       <ul class="legend" aria-label="Timeline legend">
         <li><svg viewBox="0 0 24 8" aria-hidden="true"><path d="M1 4h22" class="lg-past"/></svg>Model, past</li>
         <li><svg viewBox="0 0 24 8" aria-hidden="true"><path d="M1 4h22" class="lg-fc"/></svg>Model forecast</li>
-        <li id="lgMeas"><svg viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4" class="lg-meas"/></svg>Measured, at report time</li>
+        <li id="lgMeas"><svg viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4" class="lg-meas"/></svg>Measured (AirNow)</li>
       </ul>
     </div>
   </section>
@@ -71,7 +84,7 @@
   </section>
 
   <footer class="module sources" aria-labelledby="lbl-src">
-    <h2 id="lbl-src" class="mlabel">Sources &amp; method</h2>
+    <h2 id="lbl-src" class="mlabel" tabindex="-1">Sources &amp; method</h2>
     <div id="sources"></div>
   </footer>
 </main>

@@ -137,12 +137,33 @@ button { font: inherit; color: inherit; }
 .ro-fresh { font: 400 13px var(--font-data); color: var(--ink-2); }
 .ro-note { font-size: 14px; color: var(--ink-2); }
 .ro-note:first-of-type { margin-top: 4px; }
-.ro-alt { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: 14.5px; line-height: 1.35; color: var(--ink-2); }
-.ro-alt .badge { height: 18px; padding: 0 6px; font-size: 8.5px; flex: none; margin-top: 1px; }
-.ro-alt b { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
-.ro-alt-src { font: 400 12.5px var(--font-data); color: var(--ink-3); }
-.ro-diff-k { color: var(--ink); }
-.ro-diff { border-left: 2px solid var(--accent); padding-left: 10px; font-size: 13.5px; }
+/* secondary model reading under a measurement: same grammar, one size down */
+.ro-model { display: grid; gap: 4px; border-top: 1px solid var(--rule); padding-top: 10px; margin-top: 2px; }
+.ro-model-main { display: flex; align-items: center; gap: 14px; }
+.ro-model-num { flex: none; font: 300 44px/0.95 var(--font-ui); font-variant-numeric: tabular-nums; letter-spacing: -.02em; min-width: 1.6ch; }
+.ro-model-cat { display: flex; align-items: center; gap: 8px; font-size: 16.5px; font-weight: 500; line-height: 1.2; }
+.ro-model-c { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14.5px; color: var(--ink-2); min-width: 0;
+  border: 0; padding: 0; }
+.ro-model-c .badge { height: 18px; padding: 0 6px; font-size: 8.5px; flex: none; }
+.ro-model-t { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ro-model-t b { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; margin-right: 4px; }
+.ro-model-t .sw { margin-right: 4px; }
+.ro-model-src { font: 400 12.5px var(--font-data); color: var(--ink-3); }
+
+/* "Measured vs model" disclosure */
+.btn-info {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 44px; min-width: 44px; padding: 0 6px; margin: -14px -6px -4px 0;
+  background: none; border: 0; border-radius: 8px; color: var(--ink-2); font: 400 12.5px var(--font-data); cursor: pointer;
+}
+.btn-info svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.btn-info svg .dot { fill: currentColor; stroke: none; }
+.btn-info[aria-expanded="true"] { color: var(--ink); }
+.btn-info[aria-expanded="true"] .btn-info-t { text-decoration: underline; text-underline-offset: 3px; }
+.ro-info { margin: 0 0 12px; padding: 2px 0 2px 12px; border-left: 2px solid var(--accent); font-size: 14px; line-height: 1.45; color: var(--ink-2); max-width: 62ch; }
+.ro-info p { margin: 0 0 6px; }
+.ro-info b { color: var(--ink); font-weight: 500; }
+.ro-info p:last-child { margin: 0; }
+.ro-info a { display: inline-flex; align-items: center; min-height: 44px; color: var(--ink); }
 
 .meter { margin-block: 10px 6px; }
 .m-track { position: relative; display: flex; height: 26px; border-radius: 3px; overflow: visible; }
@@ -167,7 +188,6 @@ button { font: inherit; color: inherit; }
 .tlr-time { font: 500 14px var(--font-data); }
 .tlr-val { font-size: 16px; }
 .tlr-val b { font-weight: 600; font-variant-numeric: tabular-nums; }
-.tlr-meas { font: 400 13px var(--font-data); color: var(--ink-2); }
 .tl { width: 100%; }
 .tl-svg { display: block; width: 100%; touch-action: pan-y; cursor: crosshair; user-select: none; -webkit-user-select: none; }
 .tl-band { opacity: .11; }
@@ -324,8 +344,7 @@ button { font: inherit; color: inherit; }
 .ro-compact .ro-trend { font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ro-compact .ro-fresh, .ro-compact .ro-srctext { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ro-compact .ro-src { flex-wrap: nowrap; }
-.ro-compact .ro-alt { min-width: 0; }
-.ro-alt-t { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 .ro-compact .ro-main { gap: 12px; }
 
 /* dialog */

@@ -655,33 +655,81 @@ const keyOf = (la, lo) => `${la.toFixed(2)},${lo.toFixed(2)}`;
   await ctx.close();
 }
 
-// Observation vs model. The San Francisco monitor reports 41 (Good); the model is held constant.
+// Reading: measured first, model estimate beneath it. The San Francisco monitor reports 41 (Good); the model is held constant.
 for (const [w, dark] of [[390, false], [320, true], [320, false], [390, true]]) {
   const { pg, ctx, errors } = await page(browser, { width: w, height: w === 320 ? 568 : 844, dark, slow: [{ lat: 37.77, lon: -122.42, delay: 0, value: 120 }] });
-  await pg.waitForSelector('#readout .ro-alt');
-  const ro = await txt(pg, '#readout');
+  await pg.waitForSelector('#readout .ro-model');
   const tag = `${w}px ${dark ? 'dark' : 'light'}`;
-  check(await txt(pg, '#readout .badge') === 'Measured' && await txt(pg, '#readout .ro-num') === '41', `${tag}: observation keeps the primary reading`);
-  check(/Model 120 Unhealthy for Sensitive Groups/.test(await txt(pg, '#readout .ro-alt')), `${tag}: model estimate stays visible beside it`);
-  const diff = await txt(pg, '#readout .ro-diff').catch(() => '');
-  check(/different categories/.test(diff) && /San Francisco/.test(diff) && /2\.2 km/.test(diff) && /41 \(Good\)/.test(diff)
-    && /120 \(Unhealthy for Sensitive Groups\)/.test(diff) && /\d:30 PM|\d:30 AM/.test(diff) && /not averaged/.test(diff), `${tag}: disagreement note names sources, values, time and distance`);
-  check(!/\b8[01]\b/.test(ro) && !/because|due to|caused/i.test(diff), `${tag}: no averaged value, no claimed cause`);
-  check(/Model trend:/.test(ro), `${tag}: trend is labelled as the model's`);
+  const ro = await txt(pg, '#readout'), primary = await txt(pg, '#readout > .ro > .ro-src'), model = await txt(pg, '#readout .ro-model');
+  check(await txt(pg, '#readout .badge') === 'Measured' && await txt(pg, '#readout .ro-num') === '41' && /Good/.test(await txt(pg, '#readout .ro-cat')),
+    `${tag}: measurement is the primary reading (AQI, category)`);
+  check(/AirNow monitor · San Francisco · 2\.2 km away/.test(primary) && /Reported \d+:30 (AM|PM)/.test(await txt(pg, '#readout > .ro > .ro-fresh')),
+    `${tag}: primary names monitor, distance and report time`);
+  check(/^Model estimate CAMS global · ~40 km cell 120 Unhealthy for Sensitive Groups Model hour \d+:00 (AM|PM) \S* ?Model trend:/.test(model),
+    `${tag}: model estimate beneath it with AQI, category, source, resolution, hour and its trend (${model.slice(0, 120)})`);
+  check(!/Six hours later|different categor|not averaged/i.test(ro) && (await pg.$$('#readout .ro-trend')).length === 1, `${tag}: no explanatory paragraph, no six-hour sentence, one trend`);
+  const big = await pg.$eval('#readout .ro-num', e => parseFloat(getComputedStyle(e).fontSize));
+  const small = await pg.$eval('#readout .ro-model-num', e => parseFloat(getComputedStyle(e).fontSize));
+  check(small < big * 0.7 && small >= 36, `${tag}: model number is secondary but legible (${small}px vs ${big}px)`);
+  const meterY = await pg.$eval('#readout .meter', e => e.getBoundingClientRect().top), modelY = await pg.$eval('#readout .ro-model', e => e.getBoundingClientRect().top);
+  check(meterY < modelY, `${tag}: the scale belongs to the measurement, above the model row`);
+
+  // Explanation on demand
+  const btn = await pg.$('#infoBtn');
+  const bb = await btn.boundingBox();
+  check(await btn.getAttribute('aria-expanded') === 'false' && await pg.$eval('#roInfo', e => e.hidden) && bb.height >= 44 && bb.width >= 44,
+    `${tag}: info control is collapsed by default and a ≥44px target (${Math.round(bb.width)}×${Math.round(bb.height)})`);
+  check(await btn.getAttribute('aria-controls') === 'roInfo' && /Measured vs model/.test(await btn.textContent()), `${tag}: info control is labelled and names its panel`);
+  await pg.touchscreen.tap(bb.x + bb.width / 2, bb.y + bb.height / 2);
+  const info = await txt(pg, '#roInfo');
+  check(await btn.getAttribute('aria-expanded') === 'true' && /one site/.test(info) && /grid cell about 40 km across/.test(info)
+    && /report times/.test(info) && /can differ/.test(info) && /doesn’t show which is right/.test(info), `${tag}: panel covers sources, resolution, timing and possible differences`);
+  check(!/because|caused by|due to/i.test(info) && info.split(/\s+/).length < 75, `${tag}: brief, and asserts no cause (${info.split(/\s+/).length} words)`);
   const over = await pg.evaluate(() => document.documentElement.scrollWidth - innerWidth);
-  check(over <= 0, `${tag}: no horizontal scroll (${over})`);
-  await shot(pg, `25-disagree-${w}-${dark ? 'dark' : 'light'}`, true);
+  check(over <= 0, `${tag}: no horizontal scroll with the panel open (${over})`);
+  await shot(pg, `25-reading-${w}-${dark ? 'dark' : 'light'}`, true);
+  await pg.focus('#infoBtn');
+  await pg.keyboard.press('Escape');
+  check(await pg.$eval('#roInfo', e => e.hidden) && await btn.getAttribute('aria-expanded') === 'false' && await pg.evaluate(() => document.activeElement.id) === 'infoBtn',
+    `${tag}: Escape closes it and focus stays on the control`);
+  await pg.keyboard.press('Enter');
+  check(!(await pg.$eval('#roInfo', e => e.hidden)), `${tag}: keyboard opens it`);
+  await pg.click('#roInfo [data-info-more]');
+  await pg.waitForTimeout(600);
+  const srcTop = await pg.$eval('#lbl-src', e => e.getBoundingClientRect().top);
+  check(srcTop >= -2 && srcTop < 200 && await pg.evaluate(() => document.activeElement.id) === 'lbl-src', `${tag}: “Sources & method” link moves to that section (top ${Math.round(srcTop)})`);
+
   await pg.click('#openMap');
   await pg.waitForTimeout(400);
-  check(/different category/.test(await txt(pg, '#sheetReadout')), `${tag}: compact sheet flags the different category`);
-  await shot(pg, `26-sheet-disagree-${w}-${dark ? 'dark' : 'light'}`);
+  const sheet = await txt(pg, '#sheetReadout');
+  check(/Measured/.test(sheet) && /Model estimate 120 USG · \d+ (AM|PM) hour/.test(sheet), `${tag}: compact sheet pairs the measurement with a one-line model estimate`);
+  const clip = await pg.$eval('#sheetReadout .ro-model-c', e => { const s = document.querySelector('#sheet').getBoundingClientRect(); return e.getBoundingClientRect().bottom - s.bottom; });
+  check(clip <= 0, `${tag}: model line fits inside the compact sheet (${Math.round(clip)})`);
+  check(await pg.$eval('#sheetReadout .ro-model-t', e => e.scrollWidth <= e.clientWidth + 1), `${tag}: compact model line is not truncated`);
+  await shot(pg, `26-sheet-reading-${w}-${dark ? 'dark' : 'light'}`);
   check(errors.length === 0, `${tag}: no console errors (${errors.join(' | ')})`);
   await ctx.close();
 }
-{ // same category: both values shown, no annotation
-  const { pg, ctx } = await page(browser, { width: 390, height: 844, slow: [{ lat: 37.77, lon: -122.42, delay: 0, value: 45 }] });
-  await pg.waitForSelector('#readout .ro-alt');
-  check(/Model 45 Good/.test(await txt(pg, '#readout .ro-alt')) && !(await pg.$('#readout .ro-diff')), 'same category: model shown, no disagreement note');
+for (const [w, dark] of [[390, false], [320, true]]) { // no measurement: only the model reading, no empty comparison
+  const { pg, ctx, errors } = await page(browser, { width: w, height: w === 320 ? 568 : 844, dark });
+  await waitModel(pg);
+  await pick(pg, 'Denver');
+  const tag = `${w}px ${dark ? 'dark' : 'light'}`;
+  check(await txt(pg, '#readout .badge') === 'Model estimate' && !(await pg.$('#readout .ro-model')) && (await pg.$$('#readout .badge')).length === 1,
+    `${tag}: model-only reading has no comparison row`);
+  check(/^CAMS model via Open-Meteo · ~40 km cell$/.test(await txt(pg, '#readout .ro-srctext')) && /Model trend:/.test(await txt(pg, '#readout')) && /Model hour/.test(await txt(pg, '#readout .ro-fresh')),
+    `${tag}: model-only reading keeps source, resolution, hour and trend`);
+  check(await pg.$eval('#lgMeas', e => e.hidden), `${tag}: no measured entry in the timeline legend without a dot`);
+  await shot(pg, `27-reading-model-only-${w}-${dark ? 'dark' : 'light'}`, true);
+  check(errors.length === 0, `${tag}: no console errors (${errors.join(' | ')})`);
+  await ctx.close();
+}
+{ // the info panel follows the model's resolution (CAMS Europe)
+  const { pg, ctx } = await page(browser, { width: 390, height: 844 });
+  await waitModel(pg);
+  await pick(pg, 'Paris');
+  await pg.click('#infoBtn');
+  check(/about 10 km across/.test(await txt(pg, '#roInfo')), 'info panel gives the European ~10 km cell in Paris');
   await ctx.close();
 }
 
@@ -700,15 +748,19 @@ const dotGeom = pg => pg.evaluate(() => {
   const perHour = a.now - prev, expect = a.now + ((now - 1800) - a.hour) / 3600 * perHour;
   check(Math.abs(a.dot - expect) < 0.8 && Math.abs(a.dot - a.now) > perHour * 0.3, `measured dot at its report time (cx ${a.dot.toFixed(1)}, expected ${expect.toFixed(1)}, now line ${a.now.toFixed(1)})`);
   await pg.keyboard.press('n');
-  check(/Measured 41 at \d+:30 (AM|PM)/.test(await txt(pg, '#tlReadout')), `timeline readout names the observation time (${await txt(pg, '#tlReadout')})`);
+  const tlr = await txt(pg, '#tlReadout');
+  check(!/Measured/.test(tlr) && /Model estimate/.test(tlr), `timeline readout states the model hour only; the measurement is the dot (${tlr})`);
+  check(await txt(pg, '#tlHome .tl-label') === 'PAST' && !(await pg.$eval('#lgMeas', e => e.hidden)) && await txt(pg, '#lgMeas') === 'Measured (AirNow)',
+    'timeline labels: PAST/FORECAST in the plot, sources in the legend');
+  check(/Measured 41 at \d+:30/.test(await pg.$eval('#tlHome .tl-meas title', e => e.textContent)), 'the dot carries its own value and report time');
   check(errors.length === 0, `no console errors (${errors.join(' | ')})`);
   await ctx.close();
 }
 { // observation before the first plotted model hour: no dot drawn, readout says so
   const { pg, ctx, errors } = await page(browser, { width: 390, height: 844, nullHead: 72 });
-  await pg.waitForSelector('#readout .ro-alt, #readout .ro-num:not(.is-blank)');
+  await pg.waitForSelector('#readout .ro-num:not(.is-blank)');
   await pg.waitForTimeout(200);
-  check(!(await pg.$('#tlHome .tl-meas')) && /outside timeline/.test(await txt(pg, '#tlReadout')), 'observation outside the plotted range: no dot, stated in the readout');
+  check(!(await pg.$('#tlHome .tl-meas')) && await pg.$eval('#lgMeas', e => e.hidden), 'observation outside the plotted range: no dot, no legend entry');
   check(await txt(pg, '#readout .badge') === 'Measured', 'it still counts as the current measured reading');
   check(errors.length === 0, `no console errors (${errors.join(' | ')})`);
   await ctx.close();

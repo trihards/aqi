@@ -25,7 +25,7 @@ Open-Meteo counts each location in a request as at least one call (`max(1, varia
 
 ### Observed and modeled
 
-The timeline is model-only. A fresh AirNow observation stays the primary reading; the model estimate for the hour the observation falls in is shown beside it, never averaged with it. When the two land in different AQI categories a short note gives both sources, values, times and the monitor's distance, without suggesting a cause. The measured dot sits at the observation's own report time; it is left off when that time is outside the plotted model range, missing, or ahead of the clock.
+The timeline is model-only. A fresh AirNow observation is the primary reading (AQI, category, monitor, distance, report time); the model estimate for the hour the observation falls in sits beneath it, one size down, with its source, cell size, model hour and trend. The two are never averaged. Without a fresh observation only the model reading is shown. A "Measured vs model" disclosure in the Reading header explains the difference in a few lines, with Sources & method for detail. The measured dot sits at the observation's own report time; it is left off when that time is outside the plotted model range, missing, or ahead of the clock.
 
 OpenAQ was evaluated and not used: its API does not allow browser (CORS) requests and needs a key, so it would require a proxy. The AirNow REST API needs a key too.
 
