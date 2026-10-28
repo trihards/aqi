@@ -50,20 +50,20 @@ export function fieldSpec(lat, lon) {
       if (!d.wrap && (j < 0 || j >= d.nLon)) continue;
       const la = +(d.lat0 + i * d.step).toFixed(2);
       const lo = +(base + dj * d.step).toFixed(2);
-      cells.push({ lat: la, lon: lo, qlat: la, qlon: +normLon(lo).toFixed(2) });
+      const jj = d.wrap ? ((j % d.nLon) + d.nLon) % d.nLon : j;
+      cells.push({ ck: `${i},${jj}`, lat: la, lon: lo, qlat: la, qlon: +normLon(lo).toFixed(2) });
     }
   }
   return { domain: d.id, step: d.step, key: `${d.id}:${c.i},${c.j}`, ci: c.i, cj: c.j, cells };
 }
 
-// True when a point sits well inside an already loaded field, so it can be reused.
+// True when the point's native cell is part of the loaded field, so the field can be reused as is.
 export function fieldHolds(field, lat, lon) {
-  if (!field) return false;
+  if (!field?.cells?.length) return false;
   const c = modelCell(lat, lon), d = c.domain;
   if (d.id !== field.domain) return false;
-  let dj = c.j - field.cj;
-  if (d.wrap) dj = ((dj + d.nLon / 2) % d.nLon + d.nLon) % d.nLon - d.nLon / 2;
-  return Math.abs(c.i - field.ci) <= Math.max(1, d.rows - 2) && Math.abs(dj) <= Math.max(1, d.cols - 2);
+  const ck = `${c.i},${c.j}`;
+  return field.cells.some(x => x.ck === ck);
 }
 
 // Map framing around a point; same aspect as the original Bay Area view.
@@ -107,6 +107,18 @@ export const PLACES = [
   { name: 'Half Moon Bay', lat: 37.4636, lon: -122.4286 },
 ];
 
+// Open-Meteo usage, as its server counts it (open-meteo/open-meteo, ForecastApiResult.calculateQueryWeight
+// and RateLimiter): each location in a request costs max(1, variables/10 × max(1, days/14)) calls, so a
+// 63-cell field costs 63 and a 13-variable point series 1.3. Free limits are 600 calls a minute, 5,000 an
+// hour and 10,000 a day per IP, and failed requests are charged 1 each. A limit answers HTTP 429 with a
+// reason and a Retry-After header (exposed to browsers by CORS).
+export class ApiError extends Error {
+  constructor(message, { status = 0, reason = '', retryAfter = null } = {}) {
+    super(message);
+    this.status = status; this.reason = reason; this.retryAfter = retryAfter;
+  }
+}
+
 async function getJSON(url, timeoutMs = 15000, signal) {
   const ctl = new AbortController();
   let timedOut = false;
@@ -118,7 +130,9 @@ async function getJSON(url, timeoutMs = 15000, signal) {
     if (!res.ok) {
       let reason = '';
       try { reason = (await res.json()).reason || ''; } catch {}
-      throw new Error(`HTTP ${res.status}${reason ? ' · ' + reason : ''}`);
+      const ra = parseFloat(res.headers.get('retry-after'));
+      throw new ApiError(`HTTP ${res.status}${reason ? ' · ' + reason : ''}`,
+        { status: res.status, reason, retryAfter: Number.isFinite(ra) && ra >= 0 ? ra : null });
     }
     return await res.json();
   } catch (e) {
@@ -130,15 +144,43 @@ async function getJSON(url, timeoutMs = 15000, signal) {
   }
 }
 
+// After a 429 the air-quality API is left alone until the provider's Retry-After has passed
+// (or, without one, the end of the window its message names). Nothing retries by itself;
+// requests made meanwhile fail at once without reaching the network, since errors are charged too.
+let pause = null;
+export const omPause = () => (pause && Date.now() < pause.until ? pause : null);
+function pauseFrom(e) {
+  const r = e.reason || '';
+  const kind = /minutely/i.test(r) ? 'minute' : /hourly/i.test(r) ? 'hour' : /daily/i.test(r) ? 'day'
+    : /concurrent/i.test(r) ? 'concurrent' : 'other';
+  const fallback = { minute: 60, hour: 3600, day: 86400, concurrent: 5, other: 60 }[kind];
+  pause = { kind, reason: r, until: Date.now() + 1000 * (e.retryAfter ?? fallback) };
+  return pause;
+}
+async function omJSON(url, timeoutMs, signal) {
+  const p = omPause();
+  if (p) throw Object.assign(new Error('Open-Meteo usage limit reached'), { pause: p });
+  try { return await getJSON(url, timeoutMs, signal); }
+  catch (e) {
+    if (e.status === 429) e.pause = pauseFrom(e);
+    throw e;
+  }
+}
+
+// sessionStorage survives reloads; the in-memory copy keeps repeated reads (map markers on every
+// timeline scrub) from re-parsing JSON.
+const mem = new Map();
+function readCache(key, maxAgeMs) {
+  let hit = mem.get(key);
+  if (!hit) try { hit = JSON.parse(sessionStorage.getItem(key) || 'null'); if (hit) mem.set(key, hit); } catch {}
+  return hit && Date.now() - hit.fetchedAt < maxAgeMs ? hit : null;
+}
+function writeCache(key, v) { mem.set(key, v); try { sessionStorage.setItem(key, JSON.stringify(v)); } catch {} }
+
 function cached(key, maxAgeMs, load) {
-  try {
-    const hit = JSON.parse(sessionStorage.getItem(key) || 'null');
-    if (hit && Date.now() - hit.fetchedAt < maxAgeMs) return Promise.resolve(hit);
-  } catch {}
-  return load().then(v => {
-    try { sessionStorage.setItem(key, JSON.stringify(v)); } catch {}
-    return v;
-  });
+  const hit = readCache(key, maxAgeMs);
+  if (hit) return Promise.resolve(hit);
+  return load().then(v => { writeCache(key, v); return v; });
 }
 
 const HOURLY = [
@@ -146,45 +188,95 @@ const HOURLY = [
   'us_aqi_carbon_monoxide', 'us_aqi_sulphur_dioxide',
   'pm2_5', 'pm10', 'ozone', 'nitrogen_dioxide', 'carbon_monoxide', 'sulphur_dioxide',
 ];
+const MODEL_TTL = 10 * 60e3;
 
-export function fetchModel(lat, lon) {
-  const la = lat.toFixed(3), lo = lon.toFixed(3);
-  const cell = modelCell(lat, lon);
-  return cached(`om2:${cell.domain.id}:${la},${lo}`, 10 * 60e3, async () => {
-    const q = new URLSearchParams({
-      latitude: la, longitude: lo, hourly: HOURLY.join(','), domains: cell.domain.id, cell_selection: 'nearest',
-      past_days: '3', forecast_days: '5', timezone: 'auto', timeformat: 'unixtime',
-    });
-    const j = await getJSON(`${OM_URL}?${q}`);
-    if (!j.hourly?.time?.length) throw new Error('Model response had no hourly data');
-    const series = {};
-    for (const k of HOURLY) series[k] = j.hourly[k] || [];
-    return {
-      domain: cell.domain.id, cellLat: cell.lat, cellLon: cell.lon, tz: j.timezone || 'GMT',
-      times: j.hourly.time, series, units: j.hourly_units || {}, fetchedAt: Date.now(),
-    };
+// Point series for the native cell holding a place. With nearest-cell selection and a named domain,
+// every point in one cell gets the same values, so the cache is keyed by domain, cell and time zone.
+// When the zone is not known in advance (map taps, GPS) the request asks for timezone=auto and is
+// keyed by its own coordinates; its answer is then also filed under the zone it came back with.
+export async function fetchModel(lat, lon, tz, signal) {
+  const cell = modelCell(lat, lon), d = cell.domain.id;
+  const cellKey = z => `om3:pt:${d}:${cell.i},${cell.j}:${z}`;
+  const key = tz ? cellKey(tz) : `om3:pt:${d}:${lat.toFixed(3)},${lon.toFixed(3)}`;
+  const hit = readCache(key, MODEL_TTL);
+  if (hit) return hit;
+  const q = new URLSearchParams({
+    latitude: lat.toFixed(3), longitude: lon.toFixed(3), hourly: HOURLY.join(','), domains: d, cell_selection: 'nearest',
+    past_days: '3', forecast_days: '5', timezone: tz || 'auto', timeformat: 'unixtime',
   });
+  const j = await omJSON(`${OM_URL}?${q}`, 15000, signal);
+  if (!j.hourly?.time?.length) throw new Error('Model response had no hourly data');
+  const series = {};
+  for (const k of HOURLY) series[k] = j.hourly[k] || [];
+  const v = {
+    domain: d, cellLat: cell.lat, cellLon: cell.lon, tz: j.timezone || tz || 'GMT',
+    times: j.hourly.time, series, units: j.hourly_units || {}, fetchedAt: Date.now(),
+  };
+  writeCache(key, v);
+  if (!tz) writeCache(cellKey(v.tz), v);
+  return v;
 }
 
-// Model field: one hourly us_aqi series per native CAMS cell around the selected place,
-// requested in a single multi-coordinate call (responses come back in request order).
-// Cells are drawn as-is; nothing is interpolated.
-export function fetchField(spec) {
-  return cached(`om2:field:${spec.key}`, 20 * 60e3, async () => {
+// Point series already held for a place (no request): by cell and known zone, else by coordinates.
+export function cachedModel(lat, lon, tz) {
+  const cell = modelCell(lat, lon), d = cell.domain.id;
+  return readCache(tz ? `om3:pt:${d}:${cell.i},${cell.j}:${tz}` : `om3:pt:${d}:${lat.toFixed(3)},${lon.toFixed(3)}`, MODEL_TTL);
+}
+
+// Model field: hourly us_aqi per native CAMS cell, drawn as-is, never interpolated. Cells are cached
+// one by one per domain (GMT time axis, so no local zone is involved), and a request asks only for the
+// cells of the block that are not already held. Moving one column over costs one column, not a block.
+const FIELD_TTL = 20 * 60e3, FIELD_MAX = 900;
+const cellStores = {};
+function cellStore(domain) {
+  if (!cellStores[domain]) {
+    let m = new Map();
+    try { m = new Map(Object.entries(JSON.parse(sessionStorage.getItem(`om3:cells:${domain}`) || '{}'))); } catch {}
+    cellStores[domain] = m;
+  }
+  const m = cellStores[domain], now = Date.now();
+  for (const [k, c] of m) if (now - c.fetchedAt >= FIELD_TTL) m.delete(k);
+  return m;
+}
+function saveCells(domain) {
+  const m = cellStores[domain];
+  while (m.size > FIELD_MAX) m.delete(m.keys().next().value); // oldest first (insertion order)
+  try { sessionStorage.setItem(`om3:cells:${domain}`, JSON.stringify(Object.fromEntries(m))); } catch {}
+}
+
+// Value of a field cell at an hour (epoch s): the hour at or before t, or null outside its range.
+export function cellAt(c, t) {
+  if (!c?.aqi || t == null) return null;
+  const k = Math.floor((t - c.t0) / 3600);
+  return k >= 0 && k < c.aqi.length ? c.aqi[k] ?? null : null;
+}
+export const fieldCovers = (field, t) =>
+  !!field?.cells?.some(c => c.aqi && t >= c.t0 && t < c.t0 + c.aqi.length * 3600);
+
+export async function fetchField(spec, signal) {
+  const store = cellStore(spec.domain);
+  const missing = spec.cells.filter(c => !store.has(c.ck));
+  if (missing.length) {
     const q = new URLSearchParams({
-      latitude: spec.cells.map(c => c.qlat).join(','), longitude: spec.cells.map(c => c.qlon).join(','),
+      latitude: missing.map(c => c.qlat).join(','), longitude: missing.map(c => c.qlon).join(','),
       hourly: 'us_aqi', domains: spec.domain, cell_selection: 'nearest',
       past_days: '2', forecast_days: '4', timezone: 'GMT', timeformat: 'unixtime',
     });
-    const j = await getJSON(`${OM_URL}?${q}`, 25000);
+    const j = await omJSON(`${OM_URL}?${q}`, 25000, signal);
     const arr = Array.isArray(j) ? j : [j];
-    if (arr.length !== spec.cells.length) throw new Error('Model field response did not match the request');
-    const cells = spec.cells.map((c, k) => ({ lat: c.lat, lon: c.lon, aqi: arr[k]?.hourly?.us_aqi || [] }));
-    return {
-      times: arr[0]?.hourly?.time || [], cells, step: spec.step, domain: spec.domain, key: spec.key,
-      ci: spec.ci, cj: spec.cj, fetchedAt: Date.now(),
-    };
-  });
+    if (arr.length !== missing.length) throw new Error('Model field response did not match the request');
+    const got = arr.map(r => ({ t: r?.hourly?.time || [], v: r?.hourly?.us_aqi || [] }));
+    if (got.some(({ t }) => t.some((x, i) => i && x - t[i - 1] !== 3600))) throw new Error('Model field response was not hourly');
+    const now = Date.now();
+    missing.forEach((c, k) => store.set(c.ck, { t0: got[k].t[0] ?? 0, aqi: got[k].v.slice(0, got[k].t.length), fetchedAt: now }));
+  }
+  // Assembled before saving, so trimming the store to FIELD_MAX can never drop a cell of this block.
+  const cells = spec.cells.map(c => ({ ck: c.ck, lat: c.lat, lon: c.lon, ...store.get(c.ck) }));
+  if (missing.length) saveCells(spec.domain);
+  return {
+    cells, step: spec.step, domain: spec.domain, key: spec.key, ci: spec.ci, cj: spec.cj,
+    requested: missing.length, fetchedAt: Math.min(...cells.map(c => c.fetchedAt)),
+  };
 }
 
 // ---- place search ---------------------------------------------------------------
@@ -305,12 +397,12 @@ export function nearest(list, lat, lon, maxKm = Infinity, pred = () => true) {
   return best ? { item: best, km: bestD } : null;
 }
 
-// Value of the field cell whose centre is closest to a point (within one cell).
-export function fieldValueAt(field, lat, lon, tIdx) {
-  if (!field?.cells?.length || tIdx < 0) return null;
+// Value of the field cell whose centre is closest to a point (within one cell), at hour t (epoch s).
+export function fieldValueAt(field, lat, lon, t) {
+  if (!field?.cells?.length || t == null) return null;
   const half = field.step / 2 + 1e-6;
   const c = field.cells.find(c => Math.abs(c.lat - lat) <= half && Math.abs(c.lon - lon) <= half);
-  return c ? c.aqi[tIdx] ?? null : null;
+  return c ? cellAt(c, t) : null;
 }
 
 // Index of the last hour at or before t (seconds).

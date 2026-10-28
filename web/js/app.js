@@ -1,7 +1,7 @@
 import { CATS, category, POLLUTANTS, scalePos } from './aqi.js';
 import {
   fetchModel, fetchField, fetchMonitors, searchPlaces, PLACES, DOMAINS, nearest, fieldValueAt, indexAtOrBefore,
-  domainFor, fieldSpec, fieldHolds, viewBounds, inBayArea, airnowCovers, monitorBox, boxHolds,
+  domainFor, fieldSpec, fieldHolds, fieldCovers, cachedModel, viewBounds, inBayArea, airnowCovers, monitorBox, boxHolds, omPause,
 } from './data.js';
 import { Timeline } from './timeline.js';
 import { Explorer, Preview } from './map.js';
@@ -15,6 +15,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 
 const MONITOR_RADIUS_KM = 10;
 const MONITOR_FRESH_MS = 3 * 3600e3;
+const MONITOR_SKEW_MS = 10 * 60e3;   // a report stamped later than this ahead of the clock is not trusted
 const RECENT_MAX = 5;
 
 const validPlace = p => !!p && typeof p.kind === 'string' && Number.isFinite(p.lat) && Number.isFinite(p.lon)
@@ -136,9 +137,10 @@ function vm() {
     const n = nearest(mons, p.lat, p.lon, MONITOR_RADIUS_KM, x => x.aqi != null);
     if (n) { mon = n.item; monKm = n.km; }
   }
-  const monFresh = !!(mon && mon.aqi != null && mon.ts != null && Date.now() - mon.ts < MONITOR_FRESH_MS);
+  const monTsOk = !!(mon && mon.ts != null && mon.ts <= Date.now() + MONITOR_SKEW_MS);
+  const monFresh = !!(mon && mon.aqi != null && monTsOk && Date.now() - mon.ts < MONITOR_FRESH_MS);
   const isNow = !mi || mi.selIdx === mi.nowIdx;
-  const r = { p, mi, mon, monKm, monFresh, isNow };
+  const r = { p, mi, mon, monKm, monTsOk, monFresh, isNow };
   if (mi) {
     const s = mi.m.series, i = mi.selIdx;
     r.t = mi.m.times[i] * 1000;
@@ -148,6 +150,18 @@ function vm() {
     const back = s.us_aqi[i - 3], fwd = s.us_aqi[i + 6];
     if (r.modelAqi != null && back != null) r.trend = Math.round(r.modelAqi - back);
     if (r.modelAqi != null && fwd != null && i + 6 <= mi.hi) r.ahead = fwd;
+    // The observation is compared with the model hour it falls in, not with "now", and placed on
+    // the timeline at its own time (fractional hour index).
+    if (monFresh) {
+      const ts = mon.ts / 1000, k = indexAtOrBefore(mi.m.times, ts);
+      r.obsPos = k < 0 ? (ts - mi.m.times[0]) / 3600 : k + (ts - mi.m.times[k]) / 3600;
+      r.obsInRange = r.obsPos >= mi.lo && r.obsPos <= mi.hi;
+      const v = k >= mi.lo && k <= mi.hi ? s.us_aqi[k] : null;
+      if (v != null) {
+        r.obsModel = { aqi: v, t: mi.m.times[k] * 1000 };
+        r.disagree = category(v).key !== category(mon.aqi).key;
+      }
+    }
   }
   if (isNow && monFresh) r.primary = { aqi: mon.aqi, kind: 'measured', ts: mon.ts, dominant: mon.dominant };
   else if (r.modelAqi != null) r.primary = { aqi: r.modelAqi, kind: r.phase, ts: r.t, dominant: r.modelDominant };
@@ -190,29 +204,61 @@ function freshText(r) {
 }
 
 function trendHTML(r) {
-  if (r.trend == null) return `<p class="ro-trend muted">Trend unavailable for this hour</p>`;
+  if (r.trend == null) return `<p class="ro-trend muted">Model trend unavailable for this hour</p>`;
   const d = r.trend;
   const [g, w] = Math.abs(d) < 3 ? ['▬', 'Steady'] : d > 0 ? ['▲', 'Rising'] : ['▼', 'Falling'];
   const mag = Math.abs(d) < 3 ? `${d >= 0 ? '+' : '−'}${Math.abs(d)}` : `${d > 0 ? '+' : '−'}${Math.abs(d)}`;
-  return `<p class="ro-trend"><span class="tr-g" aria-hidden="true">${g}</span>${w}, ${mag} over the past 3 h <span class="src">model</span></p>`;
+  return `<p class="ro-trend"><span class="tr-g" aria-hidden="true">${g}</span>Model trend: ${w.toLowerCase()}, ${mag} over the past 3 h</p>`;
+}
+
+// Wording for an Open-Meteo usage pause (HTTP 429). Times are relative, so no zone is involved.
+function pauseText(p) {
+  const s = Math.max(0, Math.ceil((p.until - Date.now()) / 1000));
+  const when = s < 60 ? 'in under a minute' : s < 5400 ? `in about ${Math.ceil(s / 60)} min` : `in about ${Math.round(s / 3600)} h`;
+  if (p.kind === 'concurrent') return `Open-Meteo is busy with this device’s other requests. Try again ${when}.`;
+  const lim = { minute: 'per-minute', hour: 'hourly', day: 'daily' }[p.kind];
+  return `Open-Meteo’s free ${lim ? `${lim} ` : ''}usage limit was reached, so new model data are paused. Try again ${when}.`;
+}
+// Retry is offered only once a pause has run out; nothing retries on its own.
+const retryBtn = (what, sm = true) => (omPause() ? '' : `<button class="btn btn-retry${sm ? ' sm' : ''}" type="button" data-retry="${what}">Retry</button>`);
+const modelFailText = () => (S.modelPause ? pauseText(S.modelPause) : `Model data unavailable (${esc(S.modelError)}).`);
+
+// Observation and model side by side, never combined. The model value is for the hour the
+// observation falls in, so both refer to the same time.
+function altHTML(r, full) {
+  if (r.primary?.kind !== 'measured' || !r.obsModel) return '';
+  const c = category(r.obsModel.aqi);
+  if (!full) {   // one line in the compact sheet
+    return `<p class="ro-alt"><span class="badge b-est">Model</span> <span class="ro-alt-t"><b>${n0(r.obsModel.aqi)}</b> ${c.short}
+      ${r.disagree ? ' · <span class="ro-diff-k">different category</span>' : `<span class="ro-alt-src">· ${clock(r.obsModel.t)} hour</span>`}</span></p>`;
+  }
+  return `<p class="ro-alt"><span class="badge b-est">Model</span> <span><b>${n0(r.obsModel.aqi)}</b> ${c.label}
+    <span class="ro-alt-src">${modelDomain().km} cell · ${clock(r.obsModel.t)} hour</span></span></p>`;
+}
+function diffHTML(r) {
+  if (r.primary?.kind !== 'measured' || !r.disagree) return '';
+  const mc = category(r.mon.aqi), oc = category(r.obsModel.aqi);
+  const where = r.p.kind === 'monitor' ? '' : `, ${km(r.monKm)} away,`;
+  return `<p class="ro-note ro-diff">Monitor and model fall in different categories. AirNow ${esc(r.mon.name)}${where} reported
+    ${n0(r.mon.aqi)} (${mc.label}) at ${clock(r.mon.ts)}; the ${modelName()} estimates ${n0(r.obsModel.aqi)} (${oc.label})
+    for its ${modelDomain().km} cell in the ${clock(r.obsModel.t)} hour. Shown as reported, not averaged.</p>`;
 }
 
 function notesHTML(r) {
   const out = [];
   const pr = r.primary;
-  if (pr?.kind === 'measured' && r.modelAqi != null) {
-    out.push(`Model estimate for this ${modelDomain().km} cell: ${n0(r.modelAqi)} (${category(r.modelAqi).label}).`);
-  }
   if (r.ahead != null && pr && pr.kind !== 'forecast') {
     out.push(`Six hours later: ${n0(r.ahead)} (${category(r.ahead).label}), forecast.`);
   }
   if (S.modelStatus === 'error') {
-    out.push(`Model data unavailable (${esc(S.modelError)}), so trend, timeline and forecast are missing. <button class="btn btn-retry sm" type="button" data-retry="model">Retry</button>`);
+    out.push(`${modelFailText()} Trend, timeline and forecast are missing. ${retryBtn('model')}`);
   }
   if (S.monitors.status === 'ok') {
-    if (r.p.kind === 'monitor' && !r.monFresh) out.push('This monitor has no reading from the last 3 hours.');
+    const why = r.mon && !r.monTsOk ? (r.mon.ts == null ? 'has no usable report time' : 'has a report time ahead of the clock')
+      : 'has no reading from the last 3 hours';
+    if (r.p.kind === 'monitor' && !r.monFresh) out.push(`This monitor ${why}, so its value is not shown as current.`);
     else if (!r.mon && r.p.kind !== 'monitor') out.push(`No reporting AirNow monitor within ${MONITOR_RADIUS_KM} km.`);
-    else if (r.mon && !r.monFresh) out.push(`Nearest monitor (${esc(r.mon.name)}) has no reading from the last 3 hours.`);
+    else if (r.mon && !r.monFresh) out.push(`Nearest monitor (${esc(r.mon.name)}) ${why}, so its value is not shown as current.`);
     else if (!r.isNow && r.mon) out.push('Monitor readings exist for the latest hour only.');
   } else if (S.monitors.status === 'error') {
     out.push('Monitor feed unavailable; showing model values only.');
@@ -226,8 +272,7 @@ function readoutHTML(r, variant) {
   const full = variant === 'full';
   if (!r.primary) {
     if (S.modelStatus === 'error') {
-      return `<div class="ro ro-empty"><p class="ro-msg">Model data unavailable: ${esc(S.modelError)}.</p>
-        <button class="btn btn-retry" type="button" data-retry="model">Retry</button></div>`;
+      return `<div class="ro ro-empty"><p class="ro-msg">${modelFailText()}</p>${retryBtn('model', false)}</div>`;
     }
     const slow = Date.now() - S.modelStart > 5000;
     const msg = S.modelStatus === 'loading'
@@ -250,22 +295,23 @@ function readoutHTML(r, variant) {
         <span class="ro-unit">US AQI${dom}</span>
       </div>
     </div>
-    ${trendHTML(r)}
     <p class="ro-fresh">${freshText(r)}</p>
-    ${full ? meterHTML(pr.aqi) + notesHTML(r) : ''}
+    ${altHTML(r, full)}
+    ${full || !altHTML(r, false) ? trendHTML(r) : ''}
+    ${full ? meterHTML(pr.aqi) + diffHTML(r) + notesHTML(r) : ''}
   </div>`;
 }
 
 function tlReadoutHTML(r) {
   if (!r.mi) {
     return S.modelStatus === 'error'
-      ? `<span class="muted">Timeline unavailable: model data did not load.</span> <button class="btn btn-retry sm" type="button" data-retry="model">Retry</button>`
+      ? `<span class="muted">Timeline unavailable: ${S.modelPause ? 'model data are paused by the usage limit' : 'model data did not load'}.</span> ${retryBtn('model')}`
       : '<span class="muted">Loading timeline…</span>';
   }
   const v = r.modelAqi;
   const cat = category(v);
   const meas = r.isNow && r.monFresh
-    ? `<span class="tlr-meas">Measured ${n0(r.mon.aqi)}</span>` : '';
+    ? `<span class="tlr-meas">Measured ${n0(r.mon.aqi)} at ${clock(r.mon.ts)}${r.obsInRange ? '' : ' (outside timeline)'}</span>` : '';
   return `<span class="tlr-time">${hourLabel(r.t)}</span>
     <span class="tlr-val">${v == null ? '—' : `<b>${Math.round(v)}</b> ${cat.short}`}</span>
     ${badge(r.phase)}${meas}`;
@@ -299,7 +345,7 @@ function sourcesHTML() {
   const M = S.monitors, m = S.model;
   const modelStatus = S.modelStatus === 'ok'
     ? `Loaded. ${DOMAINS[m.domain].name} cell centred at ${m.cellLat.toFixed(2)}, ${m.cellLon.toFixed(2)}; fetched ${rel(m.fetchedAt)}.`
-    : S.modelStatus === 'error' ? `Unavailable: ${esc(S.modelError)}.` : 'Loading…';
+    : S.modelStatus === 'error' ? (S.modelPause ? 'Paused by the usage limit.' : `Unavailable: ${esc(S.modelError)}.`) : 'Loading…';
   const monStatus = M.status === 'ok'
     ? `${M.list.length} site${M.list.length === 1 ? '' : 's'} within about 100 km in the latest feed; fetched ${rel(M.data.fetchedAt)}.`
     : M.status === 'none' ? 'Not checked here. This app queries AirNow only in North America.'
@@ -324,8 +370,15 @@ function sourcesHTML() {
     <dt>How readings are chosen</dt>
     <dd>“Measured” is shown when the selected monitor, or one within ${MONITOR_RADIUS_KM} km, reported in the last 3 hours.
       Otherwise the reading is the model estimate for the grid cell. Outside North America every reading is a model estimate.
-      Trend is the change in modeled AQI over the previous 3 hours.
+      When a monitor reading and a model estimate both exist, they are shown separately for the same hour and never averaged;
+      if they fall in different categories the app says so, without guessing why. The timeline is model-only: the measured dot
+      sits at the observation’s own report time. Model trend is the change in modeled AQI over the previous 3 hours.
       The air quality map draws each model cell at its native size without smoothing, so nearby towns often share a value.</dd>
+    <dt>Requests</dt>
+    <dd>Open-Meteo’s free service counts each map cell as a request. The air quality map keeps the cells it has loaded and fetches
+      only cells it does not have, and the Locations view loads no map cells unless named places nearby need them.
+      If Open-Meteo’s usage limit is reached, the app waits for the time it gives and does not retry on its own.
+      ${omPause() ? `<span class="status">${pauseText(omPause())}</span>` : ''}</dd>
     <dt>US AQI everywhere</dt>
     <dd>All values use the U.S. EPA Air Quality Index, including outside the United States. Local agencies may publish a different index
       (for example the European Air Quality Index), so their numbers will not match.</dd>
@@ -343,12 +396,10 @@ function sourcesHTML() {
 }
 
 // ---- rendering: explorer ------------------------------------------------------
-function fieldIndex() {
-  const f = S.field.data;
-  if (!f?.times?.length) return -1;
+// Hour shown on the map field (epoch s), or null when the field does not cover it.
+function fieldTime() {
   const t = S.selT ?? Date.now() / 1000;
-  if (t < f.times[0] || t > f.times[f.times.length - 1] + 3600) return -1;
-  return indexAtOrBefore(f.times, t);
+  return fieldCovers(S.field.data, t) ? t : null;
 }
 
 function legendHTML(r) {
@@ -367,8 +418,8 @@ function legendHTML(r) {
   const F = S.field;
   const keys = CATS.slice(0, 5).map(c => `<span class="lg-cat"><i class="sw" style="--c:${c.hex}"></i>${c.short}</span>`).join('');
   const status = F.status === 'loading' ? '<p class="lg-note">Loading model field…</p>'
-    : F.status === 'error' ? `<p class="lg-note">Model field unavailable: ${esc(F.error)}. <button class="btn btn-retry sm" type="button" data-retry="field">Retry</button></p>`
-    : fieldIndex() < 0 ? '<p class="lg-note">The regional field covers 2 days back to 4 days ahead. Pick an hour in that range.</p>' : '';
+    : F.status === 'error' ? `<p class="lg-note">${F.pause ? pauseText(F.pause) : `Model field unavailable: ${esc(F.error)}.`}${F.data ? ' Cells already loaded stay on the map.' : ''} ${retryBtn('field')}</p>`
+    : F.data && fieldTime() == null ? '<p class="lg-note">The regional field covers 2 days back to 4 days ahead. Pick an hour in that range.</p>' : '';
   const d = DOMAINS[F.data?.domain] || domainFor(S.place.lat, S.place.lon);
   return `<p class="lg-row">${d.id === 'cams_europe' ? 'CAMS Europe model' : 'CAMS model'} · ${d.km} cells · shown as-is, not interpolated</p><p class="lg-row lg-cats">${keys}</p>${status}`;
 }
@@ -382,8 +433,8 @@ try { preview = new Preview($('#previewMap'), viewBounds(S.place.lat, S.place.lo
 
 // Model-estimate markers for the map: Bay Area shortcuts, recent searches and the selected
 // place, limited to the model field around the selection so nothing from a previous region lingers.
-function placeMarkers(fIdx) {
-  const spec = S.field.data || fieldSpec(S.place.lat, S.place.lon);
+function placeMarkers(fT) {
+  const spec = fieldHolds(S.field.data, S.place.lat, S.place.lon) ? S.field.data : fieldSpec(S.place.lat, S.place.lon);
   const h = spec.step / 2;
   const lats = spec.cells.map(c => c.lat), lons = spec.cells.map(c => c.lon);
   const box = [Math.min(...lats) - h, Math.min(...lons) - h, Math.max(...lats) + h, Math.max(...lons) + h];
@@ -394,14 +445,36 @@ function placeMarkers(fIdx) {
   ];
   if (S.place.kind !== 'monitor') cand.unshift({ name: placeLabel(S.place), lat: S.place.lat, lon: S.place.lon, place: S.place });
   const out = [];
+  const mi = modelInfo(), own = mi ? mi.m.series.us_aqi[mi.selIdx] ?? null : null;
   for (const p of cand) {
     if (!inside(p) || out.some(o => o.lat === p.lat && o.lon === p.lon) || nearest(out, p.lat, p.lon, 1)) continue;
     // A named place sitting on top of a reporting monitor adds clutter, not information.
     if (nearest(S.monitors.list, p.lat, p.lon, 4, m => m.aqi != null)) continue;
-    out.push({ ...p, value: fIdx < 0 ? null : fieldValueAt(S.field.data, p.lat, p.lon, fIdx) });
+    out.push({ ...p, value: p.place === S.place ? own : fieldValueAt(S.field.data, p.lat, p.lon, fT) ?? heldValue(p.place) });
   }
   return out;
 }
+
+// A named place's own point series, if one is already cached, read at the selected hour.
+function heldValue(pl) {
+  const m = cachedModel(pl.lat, pl.lon, knownTz(pl));
+  if (!m) return null;
+  const k = indexAtOrBefore(m.times, S.selT ?? Date.now() / 1000);
+  return k >= 0 ? m.series.us_aqi[k] ?? null : null;
+}
+
+// The Locations view loads field cells only to label several named places (the Bay Area shortcuts)
+// that have no cached point series; the selection and recent places read their own series.
+function fieldNeeded() {
+  if (S.mode === 'field') return true;
+  const spec = fieldSpec(S.place.lat, S.place.lon), h = spec.step / 2;
+  const lats = spec.cells.map(c => c.lat), lons = spec.cells.map(c => c.lon);
+  const [s0, w0, n1_, e0] = [Math.min(...lats) - h, Math.min(...lons) - h, Math.max(...lats) + h, Math.max(...lons) + h];
+  const unlabelled = [...PLACES.map(p => ({ kind: 'preset', ...p })), ...S.recent].filter(p => !(p.lat === S.place.lat && p.lon === S.place.lon)
+    && p.lat >= s0 && p.lat <= n1_ && p.lon >= w0 && p.lon <= e0 && !cachedModel(p.lat, p.lon, knownTz(p)));
+  return unlabelled.length >= 2;
+}
+const maybeLoadField = () => { if (S.field.status === 'idle' && fieldNeeded()) loadField(); };
 
 function selectIdx(i) {
   const mi = modelInfo();
@@ -434,7 +507,7 @@ function render() {
     const { m, lo, hi, nowIdx, selIdx } = r.mi;
     const d = {
       values: m.series.us_aqi, times: m.times, nowIdx, selIdx, lo, hi, dayParts: S.dayParts,
-      measured: r.monFresh ? { aqi: r.mon.aqi } : null,
+      measured: r.monFresh ? { aqi: r.mon.aqi, pos: r.obsPos, label: `Measured ${n0(r.mon.aqi)} at ${clock(r.mon.ts)}` } : null,
       label: i => hourLabel(m.times[i] * 1000),
     };
     tlHome.set(d);
@@ -443,10 +516,10 @@ function render() {
   document.querySelectorAll('[data-now]').forEach(b => { b.disabled = r.isNow; });
 
   if (!$('#explorer').hidden) {
-    const fIdx = fieldIndex();
+    const fT = fieldTime();
     explorer.draw({
-      field: S.field.data, fieldIdx: fIdx, monitors: S.monitors.list, isNow: r.isNow, place: S.place,
-      places: placeMarkers(fIdx),
+      field: S.field.data, fieldT: fT, monitors: S.monitors.list, isNow: r.isNow, place: S.place,
+      places: placeMarkers(fT),
     });
     $('#exLegend').innerHTML = legendHTML(r);
     const et = $('#exTime');
@@ -456,19 +529,34 @@ function render() {
   preview?.draw({ monitors: S.monitors.list, place: S.place });
 }
 
-let modelToken = 0;
+// A pause ends without a retry: the page only re-renders, so Retry buttons come back.
+let pauseTimer = 0;
+function notePause(p) {
+  if (!p) return p;
+  clearTimeout(pauseTimer);
+  pauseTimer = setTimeout(render, Math.max(0, p.until - Date.now()) + 250);
+  return p;
+}
+
+// Time zone known before asking: from the search result, or the Bay Area's. Otherwise the model
+// request asks Open-Meteo to resolve it (timezone=auto).
+const knownTz = p => p.tz || (inBayArea(p.lat, p.lon) ? 'America/Los_Angeles' : null);
+
+let modelToken = 0, modelCtl = null;
 async function loadModel() {
   const t = ++modelToken;
-  S.model = null; S.modelStatus = 'loading'; S.modelError = null; S.modelStart = Date.now();
+  modelCtl?.abort();
+  const ctl = modelCtl = new AbortController();
+  S.model = null; S.modelStatus = 'loading'; S.modelError = null; S.modelPause = null; S.modelStart = Date.now();
   render();
   setTimeout(() => { if (t === modelToken && S.modelStatus === 'loading') render(); }, 5200);
   try {
-    const m = await fetchModel(S.place.lat, S.place.lon);
+    const m = await fetchModel(S.place.lat, S.place.lon, knownTz(S.place), ctl.signal);
     if (t !== modelToken) return;
     S.model = m; S.dayParts = dayPartsFor(m); S.modelStatus = 'ok';
   } catch (e) {
     if (t !== modelToken) return;
-    S.modelStatus = 'error'; S.modelError = e.message || 'request failed';
+    S.modelStatus = 'error'; S.modelError = e.message || 'request failed'; S.modelPause = notePause(e.pause);
   }
   render();
 }
@@ -498,19 +586,24 @@ async function loadMonitors() {
   render();
 }
 
-let fieldToken = 0;
+// While new cells load, or if they fail, cells already on the map stay drawn: they are still
+// correctly placed values for their own area.
+let fieldToken = 0, fieldCtl = null;
 async function loadField() {
   const t = ++fieldToken;
+  fieldCtl?.abort();
+  const ctl = fieldCtl = new AbortController();
   const spec = fieldSpec(S.place.lat, S.place.lon);
-  S.field = { status: 'loading', data: null, error: null };
+  const keep = S.field.data?.domain === spec.domain ? S.field.data : null;
+  S.field = { status: 'loading', data: keep, error: null };
   render();
   try {
-    const d = await fetchField(spec);
+    const d = await fetchField(spec, ctl.signal);
     if (t !== fieldToken) return;
     S.field = { status: 'ok', data: d, error: null };
   } catch (e) {
     if (t !== fieldToken) return;
-    S.field = { status: 'error', data: null, error: e.message || 'request failed' };
+    S.field = { status: 'error', data: keep, error: e.message || 'request failed', pause: notePause(e.pause) };
   }
   render();
 }
@@ -528,14 +621,18 @@ function setPlace(p, { recenter = false } = {}) {
   S.hint = null;
   store.set('aqi.place', p);
   if (p.kind === 'search') remember(p);
-  if (!fieldHolds(S.field.data, p.lat, p.lon)) { fieldToken++; S.field = { status: 'idle', data: null, error: null }; }
+  // A tap inside the loaded field reuses it; outside it, only the missing cells are requested.
+  if (!fieldHolds(S.field.data, p.lat, p.lon)) {
+    fieldToken++; fieldCtl?.abort();
+    S.field = { status: 'idle', data: S.field.data?.domain === domainFor(p.lat, p.lon).id ? S.field.data : null, error: null };
+  }
   const M = S.monitors;
   if (!((M.status === 'ok' || M.status === 'loading') && boxHolds(M.bbox, p.lat, p.lon))) loadMonitors();
   const b = viewBounds(p.lat, p.lon);
   preview?.focus(b);
   if (recenter) explorer.focus(b);
   loadModel();
-  if (!$('#explorer').hidden && S.field.status === 'idle') loadField();
+  if (!$('#explorer').hidden) maybeLoadField();
 }
 
 // Explorer open/close, with history so the iOS back gesture works.
@@ -545,7 +642,7 @@ function openExplorer() {
   document.body.classList.add('ex-open');
   if (history.state?.ex !== 1) history.pushState({ ex: 1 }, '');
   explorer.show();
-  if (S.field.status === 'idle') loadField();
+  maybeLoadField();
   render();
   requestAnimationFrame(() => tlSheet.render());
 }
@@ -566,7 +663,7 @@ document.querySelectorAll('.seg [data-mode]').forEach(b => b.addEventListener('c
   S.mode = b.dataset.mode;
   document.querySelectorAll('.seg [data-mode]').forEach(x => x.setAttribute('aria-checked', String(x === b)));
   explorer.setMode(S.mode);
-  if (S.mode === 'field' && S.field.status === 'idle') loadField();
+  maybeLoadField();
   render();
 }));
 $('#exTime').addEventListener('click', () => { S.selT = null; render(); });
@@ -767,7 +864,7 @@ if (history.state?.ex === 1) history.replaceState(null, '');
 loadModel();
 loadMonitors();
 setInterval(() => {
-  if (S.model && Date.now() - S.model.fetchedAt > 15 * 60e3) loadModel();
+  if (S.model && Date.now() - S.model.fetchedAt > 15 * 60e3 && !omPause()) loadModel();
   if (S.monitors.data && Date.now() - S.monitors.data.fetchedAt > 15 * 60e3) loadMonitors();
   else render();
 }, 60e3);

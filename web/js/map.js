@@ -1,4 +1,5 @@
 import { catHex } from './aqi.js';
+import { cellAt } from './data.js';
 
 const L = window.L;
 const dark = matchMedia('(prefers-color-scheme: dark)');
@@ -113,7 +114,7 @@ export class Explorer {
   draw(v) {
     this.last = v;
     if (!this.map || !v) return;
-    const { field, fieldIdx, monitors, places, place, isNow } = v;
+    const { field, fieldT, monitors, places, place, isNow } = v;
     const Ls = this.layers;
     Object.values(Ls).forEach(l => l.clearLayers());
     this.hitTargets = [];
@@ -124,10 +125,10 @@ export class Explorer {
     show(Ls.monitors, this.mode === 'locations');
     show(Ls.places, this.mode === 'locations');
 
-    if (this.mode === 'field' && field?.cells && fieldIdx >= 0) {
+    if (this.mode === 'field' && field?.cells && fieldT != null) {
       const h = field.step / 2;
       for (const c of field.cells) {
-        const a = c.aqi[fieldIdx];
+        const a = cellAt(c, fieldT);
         L.rectangle([[c.lat - h, c.lon - h], [c.lat + h, c.lon + h]], {
           interactive: false, weight: 1,
           color: a == null ? tok('--ink-3') : catHex(a), opacity: 0.55,

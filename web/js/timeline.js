@@ -3,8 +3,9 @@ import { CATS, category } from './aqi.js';
 const NS = 'http://www.w3.org/2000/svg';
 let uid = 0;
 
-// Hourly AQI timeline: modeled past (solid), forecast (dashed, hatched ground),
-// the current measured reading (filled dot) and a selection cursor.
+// Hourly AQI timeline: modeled past (solid), model forecast (dashed, hatched ground), a selection
+// cursor, and the latest measured reading as a filled dot at its own report time. The series is the
+// model's alone; the measurement is never spliced into it.
 // The whole plot is the hit area; tap or drag horizontally to select an hour.
 export class Timeline {
   constructor(root, { onSelect, height = 168 }) {
@@ -77,7 +78,9 @@ export class Timeline {
     const x = i => ml + ((i - lo) / span) * w;
     let vmax = 0;
     for (let i = lo; i <= hi; i++) if (values[i] != null) vmax = Math.max(vmax, values[i]);
-    if (d.measured?.aqi != null) vmax = Math.max(vmax, d.measured.aqi);
+    // measured.pos is a fractional hour index; outside the plotted range the dot is left out.
+    const meas = d.measured?.aqi != null && d.measured.pos != null && d.measured.pos >= lo && d.measured.pos <= hi ? d.measured : null;
+    if (meas) vmax = Math.max(vmax, meas.aqi);
     const ymax = Math.max(100, Math.ceil((vmax + 5) / 50) * 50);
     const y = v => mt + h - (Math.min(v, ymax) / ymax) * h;
     const id = this.id;
@@ -135,11 +138,8 @@ export class Timeline {
     if (nowIdx >= lo && nowIdx <= hi) {
       const nx = x(nowIdx);
       out.push(`<line x1="${nx}" x2="${nx}" y1="${mt - 4}" y2="${mt + h}" class="tl-now"/>`);
-      out.push(`<text x="${nx - 4}" y="${mt - 8}" class="tl-label" text-anchor="end">PAST · MODEL</text>`);
+      out.push(`<text x="${nx - 4}" y="${mt - 8}" class="tl-label" text-anchor="end">MODEL · PAST</text>`);
       if (nx < ml + w - 60) out.push(`<text x="${nx + 4}" y="${mt - 8}" class="tl-label">FORECAST</text>`);
-      if (d.measured?.aqi != null) {
-        out.push(`<circle cx="${nx}" cy="${y(d.measured.aqi)}" r="5" class="tl-meas"/>`);
-      }
     }
 
     // Selection cursor
@@ -148,6 +148,11 @@ export class Timeline {
       out.push(`<line x1="${sx}" x2="${sx}" y1="${mt}" y2="${mt + h}" class="tl-cursor"/>`);
       if (sv != null) out.push(`<circle cx="${sx}" cy="${y(sv)}" r="5.5" class="tl-cursor-dot"/>`);
       out.push(`<path d="M${sx - 6},${mt + h + 1} L${sx + 6},${mt + h + 1} L${sx},${mt + h - 6} Z" class="tl-cursor-tri"/>`);
+    }
+
+    // Drawn last, so a measurement near the selected hour stays visible inside the cursor ring.
+    if (meas) {
+      out.push(`<circle cx="${x(meas.pos).toFixed(1)}" cy="${y(meas.aqi).toFixed(1)}" r="4.5" class="tl-meas"><title>${meas.label}</title></circle>`);
     }
 
     this.svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
